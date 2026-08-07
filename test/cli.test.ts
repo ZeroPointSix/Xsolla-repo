@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 
 function runCli(...args: string[]) {
   return spawnSync(process.execPath, ["--import", "tsx", cliPath, ...args], {
