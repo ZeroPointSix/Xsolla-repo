@@ -64,10 +64,11 @@ afterEach(async () => {
 });
 
 describe("Git base resolution", () => {
-  it("uses the current branch upstream before other default candidates", async () => {
+  it("uses the current branch upstream instead of a tag named trunk", async () => {
     const fixture = await createRepository("trunk");
     git(fixture.repositoryPath, "config", "branch.feature.remote", ".");
     git(fixture.repositoryPath, "config", "branch.feature.merge", "refs/heads/trunk");
+    git(fixture.repositoryPath, "tag", "trunk", "HEAD");
 
     expect(resolveBaseRef(fixture.repositoryPath)).toBe(fixture.baseCommit);
     expect(changedFiles(fixture.repositoryPath)).toEqual([
