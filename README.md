@@ -50,26 +50,28 @@ exactly equal one of the following strings:
 Set `REPOSITORY_INSPECTOR_MCP_ALLOW_ANY_VALIDATION_COMMANDS=1` only when the
 MCP host deliberately accepts the broader local-executable capability. That
 opt-in removes the command allowlist, not the shellless tokenizer or the
-canonical repository-root check. This is still experimental: Issue #5 has not
-implemented timeout and output bounds.
+canonical repository-root check.
 
 ### Reliability, discoverability, latency/context, and output-size tradeoffs
 
 A CLI command is discoverable through its executable, `--help`-style usage,
-and repository documentation. It lets a developer wait for the review in their
-terminal and keep the complete Markdown report on the local filesystem. That
-is a better fit for repository reviews, whose report and command output can be
-large. A stdio MCP result would consume agent context, make output-size limits
-the caller's problem, and add process/protocol failure modes. The experimental
-MCP source has no production reliability, latency, discoverability, or
-output-size commitment.
+and repository documentation. Each CLI validation has a 60-second timeout and
+captures at most 256 KiB (262,144 bytes) from each of stdout and stderr.
+Experimental MCP uses a 15-second timeout and captures at most 32 KiB (32,768
+bytes) from each stream. Capture is
+streaming and bounded: when a stream exceeds its limit, the report preserves a
+head and tail, inserts a visible `[..., <count> bytes omitted ...]` marker, and reports
+the retained and omitted source-byte counts. Timed-out commands receive the
+`timed_out` status; POSIX process groups receive `SIGTERM`, then `SIGKILL` after
+one second if needed. Windows uses shellless `taskkill /PID <pid> /T`, followed
+by `/F` after the same grace period, to clean up the process tree.
 
 ### Consistency policy
 
 Only the CLI has a production behavior guarantee. There is no supported MCP
 availability or parity claim. A future production MCP interface must retain
-Issue #1's typed repository-path mapping and Issue #4's shellless, allowlisted
-validation policy, add Issue #5's timeout and output bounds, then be specified
+Issue #1's typed repository-path mapping, Issue #4's shellless, allowlisted
+validation policy, and these timeout and output bounds before being specified
 and documented against the CLI.
 
 ### Evidence that would change the decision
@@ -119,8 +121,8 @@ repository is canonicalized and must remain inside that root. Its default
 validation-command allowlist and the only opt-in that broadens it are documented
 in the trust-boundary section above. The implementation never invokes a shell.
 
-The interface remains experimental because it does not yet provide Issue #5's
-timeout and output bounds. Do not treat its constrained policy as a substitute
+The interface remains experimental despite its 15-second timeout and 32 KiB
+per-stream output bounds. Do not treat its constrained policy as a substitute
 for a general-purpose agent command-execution boundary.
 
 ## Project layout

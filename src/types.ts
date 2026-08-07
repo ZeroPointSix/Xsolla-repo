@@ -3,14 +3,23 @@ export type ChangedFile = {
   status: "added" | "modified" | "deleted" | "untracked";
 };
 
+export type ValidationOutputTruncation = {
+  truncated: boolean;
+  capturedBytes: number;
+  omittedBytes: number;
+};
+
 export type ValidationResult = {
   command: string;
-  status: "passed" | "failed" | "error";
+  status: "passed" | "failed" | "error" | "timed_out";
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  stdoutTruncation: ValidationOutputTruncation;
+  stderrTruncation: ValidationOutputTruncation;
   signal?: NodeJS.Signals;
   error?: string;
+  timeoutMs?: number;
 };
 
 export type ReviewRequest = {

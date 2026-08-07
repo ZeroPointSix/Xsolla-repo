@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { reviewRepository } from "./core.js";
 import type { ReviewRequest } from "./types.js";
-import { tokenizeValidationCommand } from "./validation.js";
+import {
+  MCP_VALIDATION_DEFAULTS,
+  tokenizeValidationCommand,
+} from "./validation.js";
 
 export const MCP_REPOSITORY_ROOT_ENV = "REPOSITORY_INSPECTOR_MCP_ROOT";
 export const MCP_ALLOW_ANY_VALIDATION_COMMANDS_ENV =
@@ -151,7 +154,7 @@ export function createMcpServer(options: McpServerOptions = {}): McpServer {
     async (input: McpReviewRequest) => {
       try {
         const request = validateMcpReviewRequest(toReviewRequest(input), environment);
-        const report = await reviewRepository(request);
+        const report = await reviewRepository(request, MCP_VALIDATION_DEFAULTS);
         return { content: [{ type: "text", text: report }] };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown MCP review failure.";
