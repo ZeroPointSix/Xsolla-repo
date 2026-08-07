@@ -175,8 +175,8 @@ function optionalCommit(
 }
 
 /**
- * Resolves an omitted base ref from the current branch upstream, origin/HEAD,
- * then local main and master to support standalone repositories.
+ * Resolves an omitted base ref from the current branch upstream, then fully
+ * qualified remote and local branch refs to avoid tag-name ambiguity.
  */
 export function resolveBaseRef(
   repositoryPath: string,
@@ -194,7 +194,12 @@ export function resolveBaseRef(
     return verifyCommit(repositoryPath, baseRef, execute);
   }
 
-  for (const candidate of ["@{u}", "origin/HEAD", "main", "master"]) {
+  for (const candidate of [
+    "@{u}",
+    "refs/remotes/origin/HEAD",
+    "refs/heads/main",
+    "refs/heads/master",
+  ]) {
     const commit = optionalCommit(repositoryPath, candidate, execute);
     if (commit) {
       return commit;
@@ -202,7 +207,7 @@ export function resolveBaseRef(
   }
 
   throw new GitReferenceError(
-    "Could not determine a Git base commit. Pass --base-ref <commit-ish>; no current-branch upstream, origin/HEAD, local main, or local master resolved to a commit.",
+    "Could not determine a Git base commit. Pass --base-ref <commit-ish>; no current-branch upstream, refs/remotes/origin/HEAD, refs/heads/main, or refs/heads/master resolved to a commit.",
   );
 }
 

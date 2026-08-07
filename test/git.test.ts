@@ -75,16 +75,31 @@ describe("Git base resolution", () => {
     ]);
   });
 
-  it("uses origin/HEAD when the current branch has no upstream", async () => {
+  it("uses refs/remotes/origin/HEAD instead of a tag named origin/HEAD", async () => {
     const fixture = await createRepository("trunk");
     git(fixture.repositoryPath, "remote", "add", "origin", "https://example.invalid/repository.git");
     git(fixture.repositoryPath, "update-ref", "refs/remotes/origin/HEAD", fixture.baseCommit);
+    git(fixture.repositoryPath, "tag", "origin/HEAD", "HEAD");
 
     expect(resolveBaseRef(fixture.repositoryPath)).toBe(fixture.baseCommit);
+    expect(changedFiles(fixture.repositoryPath)).toEqual([
+      { path: "feature.txt", status: "added" },
+    ]);
   });
 
-  it("falls back to local master in a standalone repository", async () => {
+  it("uses refs/heads/main instead of a tag named main", async () => {
+    const fixture = await createRepository("main");
+    git(fixture.repositoryPath, "tag", "main", "HEAD");
+
+    expect(resolveBaseRef(fixture.repositoryPath)).toBe(fixture.baseCommit);
+    expect(changedFiles(fixture.repositoryPath)).toEqual([
+      { path: "feature.txt", status: "added" },
+    ]);
+  });
+
+  it("uses refs/heads/master instead of a tag named master", async () => {
     const fixture = await createRepository("master");
+    git(fixture.repositoryPath, "tag", "master", "HEAD");
 
     expect(resolveBaseRef(fixture.repositoryPath)).toBe(fixture.baseCommit);
     expect(changedFiles(fixture.repositoryPath)).toEqual([
