@@ -13,7 +13,7 @@
 - 实现校验超时、进程树终止、stdout/stderr 有界捕获和截断诊断（#5）。
 - 严格解析 CLI 参数（#6）；使用安全的 Git 基准引用回退（#7）；无损、失败关闭地解析 Git rename/copy 状态（#8）；并将已提交、暂存、未暂存和未跟踪文件合并到本地审查视图（#12）。
 - 实现共享的结构化结果、CLI JSON 与 MCP `structuredContent`（#13），安全地渲染 Markdown 并完善 `--output` 行为（#11）。
-- 补充核心流程和定位回归测试（#9）、TypeScript ESLint/PR 检查/编译入口 smoke/audit（#10），并删除无依据的 Hono override、升级 MCP SDK 后重新锁定依赖（#14）。
+- PR #31 补充核心流程和定位回归测试（#9）；#32 增加 TypeScript ESLint、PR 检查、已安装 CLI 与编译 MCP smoke/audit（#10）；#30 删除无依据的 Hono override、升级 MCP SDK 后重新锁定依赖（#14）。
 - 将产品定位定为 CLI-first，保留 MCP 为受限的实验性兼容接口（#15）。
 
 ### Delivery stack and intended merge order
@@ -36,7 +36,7 @@
 | 12 | [#29](https://github.com/ZeroPointSix/Xsolla-repo/pull/29) | #11：安全 Markdown 报告与输出目标 |
 | 13 | [#30](https://github.com/ZeroPointSix/Xsolla-repo/pull/30) | #14：移除无依据 Hono override |
 | 14 | [#31](https://github.com/ZeroPointSix/Xsolla-repo/pull/31) | #9：核心流程回归与覆盖审计 |
-| 15 | [#32](https://github.com/ZeroPointSix/Xsolla-repo/pull/32) | #10：lint、PR 检查和编译 CLI 入口验证 |
+| 15 | [#32](https://github.com/ZeroPointSix/Xsolla-repo/pull/32) | #10：lint、PR 检查、已安装 CLI 与编译 MCP smoke |
 
 本收口 PR 建立在 #32 之上。按本请求，以上 PR 与本 PR 都没有合并。
 
@@ -81,26 +81,35 @@
 
 ## Commands used to verify the result, with outcomes
 
-最终收口在干净安装后执行；所有 npm 命令使用 `/tmp/xsolla-repo-npm-cache`。
+最终收口从移除 `node_modules` 与 `dist` 的干净工作树执行。为避免环境默认 npm cache 的所有权问题，先运行 `export npm_config_cache=/tmp/xsolla-repo-npm-cache`；以下是实际执行的、与 `.github/workflows/public-checks.yml` 相同顺序的命令。CI 只运行其中第一处 `npm test`；后两次是本次要求的正常模式稳定性复验。
 
-- `npm ci --cache /tmp/xsolla-repo-npm-cache`：通过，安装 217 个包并报告 0 个漏洞。npm 另提示 `esbuild` 与 `fsevents` 的 install script 尚待 allow-scripts 审批；这不是安装失败，也没有在本 PR 执行或变更脚本策略。
-- `npm run typecheck`：通过。
-- `npm run lint`：通过。
-- `npm run build`：通过。
-- `node ./dist/cli.js --help && node ./dist/cli.js review --help`：通过，两次均输出编译 CLI 用法。
-- `npm test`：正常全量模式连续运行 3 次，三次均为 `8 passed` 测试文件、`139 passed | 1 skipped` 测试、合计 140。
-- `npm test -- test/git.test.ts`：通过，25/25。
-- `npm test -- test/validation.test.ts`：通过，71 passed、1 skipped，合计 72。
+```sh
+export npm_config_cache=/tmp/xsolla-repo-npm-cache
+npm ci --cache /tmp/xsolla-repo-npm-cache
+npm run typecheck
+npm run lint
+npm run build
+npm run smoke:installed-cli
+npm run smoke:compiled-mcp
+npm test
+npm test
+npm test
+npm audit --omit=dev --package-lock-only --cache /tmp/xsolla-repo-npm-cache
+```
+
+- `npm ci --cache /tmp/xsolla-repo-npm-cache`：通过，实际输出为新增 247 个包、审计 248 个包、`found 0 vulnerabilities`。npm 另提示 `esbuild` 与 `fsevents` 的 install script 尚待 allow-scripts 审批；这不是安装失败，也没有在本 PR 执行或变更脚本策略。
+- `npm run typecheck`、`npm run lint`、`npm run build`：依次通过。
+- `npm run smoke:installed-cli`：通过（exit 0）。这是 #32 提交的 `scripts/smoke-installed-cli.mjs` 的准确 npm 调用，不是手工拼接 `node` 或占位路径：脚本确认已构建的 `package.json` `bin.inspector` 目标存在，执行 `npm pack --json` 并解析 tarball，断言其中包含该声明的 bin 目标；随后临时安装该 tarball，断言 `node_modules/.bin/inspector` 存在且 `inspector review --help` 匹配 `Usage: inspector review`。脚本还创建两次提交的临时 Git 仓库，并以已安装 binary 的参数数组 `["review", "--repo", repositoryPath, "--base-ref", "HEAD~1", "--format", "json", "--output", reportPath]` 写入 JSON，再解析并精确断言 `changedFiles` 为 `[{ path: "added-by-smoke.txt", status: "added" }]`。本次运行成功；该脚本本身不打印额外的成功文本。
+- `npm run smoke:compiled-mcp`：通过（exit 0）。这是 #32 提交的 `scripts/smoke-compiled-mcp.mjs` 的准确 npm 调用：先断言 `dist/mcp-server.js` 存在，创建两次提交的临时 Git 仓库，然后以已提交的 `Client({ name: "repository-inspector-mcp-smoke", version: "1.0.0" })` 和 `new StdioClientTransport({ command: process.execPath, args: [mcpServerPath], cwd: projectRoot, env: { ...process.env, REPOSITORY_INSPECTOR_MCP_ROOT: temporaryRoot } })` 启动编译 MCP。客户端调用 `review_repository`，实参是 `{ repo_path: repositoryPath, base_ref: "HEAD~1" }`；脚本断言结果是非错误对象、有对象类型的 `structuredContent`、有数组类型的 `changedFiles`，并精确断言该数组为 `[{ path: "added-by-mcp-smoke.txt", status: "added" }]`。本次运行成功；该脚本同样不打印额外的成功文本。
+- 三次 `npm test`：全部在正常全量模式通过；每次均为 `8 passed` 测试文件、`139 passed | 1 skipped` 测试、合计 140。
 - `npm audit --omit=dev --package-lock-only --cache /tmp/xsolla-repo-npm-cache`：通过，`found 0 vulnerabilities`。
-- 在临时 Git 仓库创建 `baseline` 与 `changed` 两个提交后，运行 `node ./dist/cli.js review --repo <temporary-repository> --base-ref HEAD~1 --format json --output -`，并由 Node 解析/断言 JSON：通过，输出 `JSON CLI smoke passed: sample.txt modified`；`--output -` 未写出报告文件。
-- 使用 SDK `Client` 和 `StdioClientTransport` 启动 `node <worktree>/dist/mcp-server.js`，并以 `REPOSITORY_INSPECTOR_MCP_ROOT=<temporary-root>` 执行 `listTools` 与 `review_repository({ repo_path, base_ref: "HEAD~1" })`：通过，输出 `MCP stdio smoke passed: review_repository returned structured sample.txt change`，确认真实 stdio 传输和 `structuredContent`。
 - `git diff --check origin/ci/issue-10-pr-lint-and-entrypoint-checks...HEAD`：在本 PR 文档变更完成后通过。
 
 ## A blocker you hit and how you approached it
 
-环境中的默认 npm cache 曾因所有权导致 `EACCES`，不能把该失败误报为依赖或代码问题。后续所有安装/审计显式使用可写的 `/tmp/xsolla-repo-npm-cache`；最终的干净 `npm ci` 和 production audit 均通过。
+环境中的默认 npm cache 曾因所有权导致 `EACCES`，不能把该失败误报为依赖或代码问题。未导出 cache 环境变量时，已安装 CLI smoke 的临时 `npm install` 也会读到该默认 cache 并失败；从干净工作树导出 `npm_config_cache=/tmp/xsolla-repo-npm-cache` 后，完整 CI 顺序、两个 smoke、三次全量测试和 production audit 均通过。没有为此修改运行时代码、依赖或 smoke 脚本。
 
-测试稳定性也单独处理。#31 在复现 marker/子进程启动等待与 MCP 集成 deadline 的波动后，只调整测试夹具同步、集成测试 deadline 和测试专用 timeout，不改变 `src/` 的生产 timeout 策略；其 PR 记录了连续 10 次正常全量测试通过。最终收口再次以正常模式连续运行全量测试 3 次，均为 139 passed、1 skipped，作为当前稳定性证据。
+测试稳定性也单独处理。PR #31 在复现 marker/子进程启动等待与 MCP 集成 deadline 的波动后，只调整测试夹具同步、集成测试 deadline 和测试专用 timeout，不改变 `src/` 的生产 timeout 策略；其 PR 记录了连续 10 次正常全量测试通过。最终收口再次以正常模式连续运行全量测试 3 次，均为 139 passed、1 skipped，作为当前稳定性证据。
 
 ## Known limitations and the next three things you would do
 
@@ -113,5 +122,5 @@
 ## Approximate focused-work time
 
 - Start: approximately 2026-08-07 21:13 CST（该堆叠的 #18 首个提交）。
-- Finish: approximately 2026-08-08 05:30 CST（最终干净安装、重复测试、CLI JSON 与 MCP stdio smoke 及文档收口）。
-- Elapsed span: approximately 8 hours 17 minutes. 精确的个人专注分钟数未单独计时；但这套逐 Issue、逐 PR 的实现、rebase、验证和收口工作显然超过原评估的 90 分钟 timebox。不能诚实地把它表述为遵守了原 90 分钟限制。
+- Finish: approximately 2026-08-08 06:10 CST（rebase 到 #32 更新后的 head、干净安装、完整 CI 顺序、两个已提交 smoke、三次全量测试和文档收口）。
+- Elapsed span: approximately 8 hours 57 minutes. 精确的个人专注分钟数未单独计时；但这套逐 Issue、逐 PR 的实现、rebase、验证和收口工作显然超过原评估的 90 分钟 timebox。不能诚实地把它表述为遵守了原 90 分钟限制。
