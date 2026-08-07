@@ -8,6 +8,7 @@ import {
   GIT_MAX_BUFFER_BYTES,
   GitCommandError,
   GitExecutableError,
+  GitNameStatusParseError,
   GitReferenceError,
   GitRepositoryError,
   parseNameStatusNul,
@@ -16,8 +17,8 @@ import {
 } from "../src/git.js";
 import {
   completeNameStatusOutput,
-  interleavedMalformedNameStatusOutput,
   malformedNameStatusOutputs,
+  malformedStatusPrefixes,
 } from "./fixtures/git-name-status.js";
 
 type RepositoryFixture = {
@@ -70,19 +71,19 @@ afterEach(async () => {
 });
 
 describe("NUL-delimited Git name-status parsing", () => {
-  it("preserves paths and models all supported committed-diff statuses", () => {
+  it("preserves Unicode, tab, and newline paths for all supported statuses", () => {
     expect(parseNameStatusNul(completeNameStatusOutput)).toEqual([
       { path: "src/中文 file.ts", status: "added" },
       { path: "deleted file.ts", status: "deleted" },
       { path: "src/literal\tname.ts", status: "modified" },
       {
-        path: "renames/new 中文 name.ts",
+        path: "renames/new\n中文 name.ts",
         previousPath: "renames/old\tname.ts",
         status: "renamed",
       },
       {
         path: "copies/destination\tfile.ts",
-        previousPath: "copies/source file.ts",
+        previousPath: "copies/source\nfile.ts",
         status: "copied",
       },
       { path: "links/changed target", status: "type_changed" },
@@ -90,38 +91,36 @@ describe("NUL-delimited Git name-status parsing", () => {
     ]);
   });
 
-  it("ignores malformed name-status records", () => {
-    for (const output of malformedNameStatusOutputs) {
-      expect(parseNameStatusNul(output)).toEqual([]);
+  it("returns no changes for a complete empty stream", () => {
+    expect(parseNameStatusNul("")).toEqual([]);
+  });
+
+  it("fails closed with a typed error for malformed records", () => {
+    for (const output of Object.values(malformedNameStatusOutputs)) {
+      expect(() => parseNameStatusNul(output)).toThrow(GitNameStatusParseError);
     }
   });
 
-  it("recovers valid records interleaved with empty, unknown, and truncated records", () => {
-    expect(parseNameStatusNul(interleavedMalformedNameStatusOutput)).toEqual([
-      { path: "added.ts", status: "added" },
-      {
-        path: "renames/new.ts",
-        previousPath: "renames/old.ts",
-        status: "renamed",
-      },
-      { path: "modified.ts", status: "modified" },
-    ]);
+  it("does not treat a status token as a recovered path after misalignment", () => {
+    expect(() => parseNameStatusNul("M\0A\0recovered.ts\0")).toThrow(
+      GitNameStatusParseError,
+    );
   });
 
-  it("keeps a valid record after fuzzed malformed prefixes", () => {
+  it("fails closed for fuzzed malformed prefixes instead of recovering later records", () => {
     let state = 0x5eed1234;
-    const malformedTokens = ["", "X", "M", "R100", "C75", "not-a-status", "\t", "\n"];
     const next = () => {
       state = (state * 1_664_525 + 1_013_904_223) >>> 0;
       return state;
     };
 
     for (let iteration = 0; iteration < 100; iteration += 1) {
-      const prefix = Array.from({ length: next() % 12 }, () => malformedTokens[next() % malformedTokens.length]!);
-      const path = `recovered-${iteration}.ts`;
-      const output = [...prefix, "", "A", path].join("\0") + "\0";
+      const status = malformedStatusPrefixes[next() % malformedStatusPrefixes.length]!;
+      const output = [status, `invalid-${iteration}.ts`, "A", `recovered-${iteration}.ts`].join(
+        "\0",
+      ) + "\0";
 
-      expect(parseNameStatusNul(output)).toContainEqual({ path, status: "added" });
+      expect(() => parseNameStatusNul(output)).toThrow(GitNameStatusParseError);
     }
   });
 });

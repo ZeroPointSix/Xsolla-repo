@@ -31,6 +31,18 @@ describe("markdownReport", () => {
     expect(report).toContain("standard error");
   });
 
+  it("escapes newline and control characters in the repository-path title", () => {
+    const report = markdownReport({
+      repositoryPath: "/work/\n# injected\t`repository`",
+      changedFiles: [],
+      validationResults: [],
+    });
+
+    expect(report).toContain("# Review Report: /work/\\n\\# injected\\t\\`repository\\`\\u0001");
+    expect(report).not.toContain("\n# injected");
+    expect(report).not.toContain("");
+  });
+
   it("renders renamed and copied files as separate source and destination paths", () => {
     const report = markdownReport({
       repositoryPath: "/work/sample",

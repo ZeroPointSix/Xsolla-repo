@@ -74,7 +74,11 @@ function changedFileLine(file: ChangedFile): string {
 }
 
 export function markdownReport(input: ReportInput): string {
-  const lines = [`# Review Report: ${input.repositoryPath}`, "", "## Changed files"];
+  const lines = [
+    `# Review Report: ${formatMarkdownPath(input.repositoryPath)}`,
+    "",
+    "## Changed files",
+  ];
   for (const file of input.changedFiles) {
     lines.push(`- ${changedFileLine(file)}`);
   }

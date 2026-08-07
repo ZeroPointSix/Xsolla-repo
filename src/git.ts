@@ -38,6 +38,24 @@ export class GitRepositoryError extends GitError {}
 export class GitReferenceError extends GitError {}
 export class GitCommandError extends GitError {}
 
+export type GitNameStatusParseErrorKind =
+  | "empty_field"
+  | "unknown_status"
+  | "unterminated_stream"
+  | "incomplete_record";
+
+/** Signals that a NUL-delimited Git name-status stream is not unambiguous. */
+export class GitNameStatusParseError extends GitError {
+  constructor(
+    readonly kind: GitNameStatusParseErrorKind,
+    readonly fieldIndex: number,
+  ) {
+    super(
+      `Git --name-status -z output is malformed (${kind} at field ${fieldIndex}); no changed files were returned.`,
+    );
+  }
+}
+
 const executeGit: GitExecutor = (repositoryPath, args, { maxBuffer }) =>
   execFileSync("git", args, {
     cwd: repositoryPath,
@@ -254,29 +272,43 @@ function nameStatusRecord(token: string): NameStatusRecord | undefined {
 }
 
 /**
- * Parses Git's NUL-delimited `--name-status -z` output without altering paths.
- * Malformed records are ignored rather than being joined into invalid file paths.
+ * Parses a complete Git `--name-status -z` stream without changing path bytes.
+ *
+ * Fail closed rather than attempting recovery: after a malformed field, the
+ * remaining NUL fields cannot be unambiguously assigned to status records.
  */
 export function parseNameStatusNul(output: string): ChangedFile[] {
-  // A final non-NUL-terminated field may have been truncated, so it cannot be
-  // part of a complete record. When output is complete, this removes its NUL
-  // sentinel instead.
-  const fields = output.split("\0").slice(0, -1);
+  if (output === "") {
+    return [];
+  }
+  if (!output.endsWith("\0")) {
+    throw new GitNameStatusParseError("unterminated_stream", output.split("\0").length - 1);
+  }
+
+  const fields = output.slice(0, -1).split("\0");
   const files: ChangedFile[] = [];
   let index = 0;
   while (index < fields.length) {
-    const record = nameStatusRecord(fields[index] ?? "");
-    if (!record) {
-      index += 1;
-      continue;
+    const token = fields[index]!;
+    if (!token) {
+      throw new GitNameStatusParseError("empty_field", index);
     }
 
-    const paths = fields.slice(index + 1, index + 1 + record.arity);
-    if (paths.length !== record.arity || paths.some((path) => !path)) {
-      // Advance only past the status token so a subsequent well-formed record
-      // is not swallowed while recovering from malformed input.
-      index += 1;
-      continue;
+    const record = nameStatusRecord(token);
+    if (!record) {
+      throw new GitNameStatusParseError("unknown_status", index);
+    }
+
+    const pathStart = index + 1;
+    const pathEnd = pathStart + record.arity;
+    if (pathEnd > fields.length) {
+      throw new GitNameStatusParseError("incomplete_record", index);
+    }
+
+    const paths = fields.slice(pathStart, pathEnd);
+    const emptyPathIndex = paths.findIndex((path) => path === "");
+    if (emptyPathIndex !== -1) {
+      throw new GitNameStatusParseError("empty_field", pathStart + emptyPathIndex);
     }
 
     if (record.arity === 1) {
@@ -288,7 +320,7 @@ export function parseNameStatusNul(output: string): ChangedFile[] {
         status: record.status,
       });
     }
-    index += record.arity + 1;
+    index = pathEnd;
   }
 
   return files;

@@ -121,6 +121,21 @@ branch's upstream, then `refs/remotes/origin/HEAD`, `refs/heads/main`, and
 fully qualified fallback refs prevent same-named tags from being selected. If none
 resolves, pass an existing commit ref explicitly with `--base-ref <commit-ish>`.
 
+### Git change parsing
+
+The inspector requests Git's NUL-delimited `--name-status -z` output with rename
+and copy detection (including `--find-copies-harder`). A complete valid stream is
+parsed losslessly: `A`, `D`, `M`, `R<score>`, `C<score>`, `T`, and `U` records
+retain their original paths, including Unicode, tabs, and newlines. An empty
+stream means there are no changed files.
+
+The parser is deliberately fail-closed. It throws a typed
+`GitNameStatusParseError` and returns no changed-file list when a stream contains
+an empty or unknown status field, an incomplete or misaligned record, or lacks
+the final NUL terminator. It does not try to resynchronize malformed fields,
+because doing so could fabricate paths or misassign later fields to an earlier
+status record.
+
 The report is written to `review-report.md`.
 
 ## Retained experimental MCP source
