@@ -13,6 +13,26 @@ function stayAlive(marker) {
   setInterval(() => {}, 1_000);
 }
 
+function ignoreTerm(marker) {
+  writeFileSync(marker, String(process.pid));
+  process.on("SIGTERM", () => {
+    appendFileSync(marker, "\nTERM-IGNORED");
+  });
+  setInterval(() => {}, 1_000);
+}
+
+function parentExitsOnTermWithDescendant(parentMarker, descendantMarker) {
+  spawn(process.execPath, [__filename, "ignore-term", descendantMarker], {
+    stdio: "ignore",
+  });
+  writeFileSync(parentMarker, String(process.pid));
+  process.on("SIGTERM", () => {
+    appendFileSync(parentMarker, "\nTERM");
+    process.exit(0);
+  });
+  setInterval(() => {}, 1_000);
+}
+
 function writeLargeOutput(stream, name, size) {
   stream.write(`${name}-head\n`);
   let remaining = size;
@@ -60,6 +80,12 @@ switch (mode) {
   }
   case "stay-alive":
     stayAlive(args[0]);
+    break;
+  case "ignore-term":
+    ignoreTerm(args[0]);
+    break;
+  case "parent-exits-on-term-with-descendant":
+    parentExitsOnTermWithDescendant(args[0], args[1]);
     break;
   case "large-output": {
     const [stream, size] = args;

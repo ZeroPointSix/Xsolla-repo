@@ -103,7 +103,10 @@ function fakeChild(pid = 4_321): ChildProcess {
 }
 
 function fakeTaskkill(): ChildProcess {
-  return Object.assign(new EventEmitter(), { unref: vi.fn() }) as unknown as ChildProcess;
+  return Object.assign(new EventEmitter(), {
+    kill: vi.fn(() => true),
+    unref: vi.fn(),
+  }) as unknown as ChildProcess;
 }
 
 function graphemePrefix(value: string, source: string): boolean {
@@ -207,16 +210,17 @@ describe("terminateProcessTree", () => {
       1,
       "taskkill",
       ["/PID", "4321", "/T"],
-      { shell: false, windowsHide: true },
+      { shell: false, stdio: "ignore", windowsHide: true },
     );
     expect(spawnTaskkill).toHaveBeenNthCalledWith(
       2,
       "taskkill",
       ["/PID", "4321", "/T", "/F"],
-      { shell: false, windowsHide: true },
+      { shell: false, stdio: "ignore", windowsHide: true },
     );
     expect(child.kill).not.toHaveBeenCalled();
-    expect(termTaskkill.unref).toHaveBeenCalledOnce();
+    expect(termTaskkill.unref).not.toHaveBeenCalled();
+    expect(forceTaskkill.unref).not.toHaveBeenCalled();
   });
 
   it("observes nonzero taskkill close codes and falls back to the direct child", async () => {
@@ -251,6 +255,63 @@ describe("terminateProcessTree", () => {
       error: expect.stringContaining("ENOENT"),
     });
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("kills and reaps a hanging taskkill helper after its observation window", async () => {
+    const child = fakeChild();
+    const taskkill = fakeTaskkill();
+    const helperKill = vi.fn(() => {
+      queueMicrotask(() => taskkill.emit("close", null, "SIGKILL"));
+      return true;
+    });
+    Object.assign(taskkill, { kill: helperKill });
+    const started = Date.now();
+
+    const termination = await terminateProcessTree(child, "SIGTERM", {
+      platform: "win32",
+      taskkillSpawn: vi.fn(() => taskkill) as never,
+      taskkillObservationMs: 20,
+    });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(10);
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(termination).toMatchObject({
+      succeeded: false,
+      error: expect.stringContaining("did not report completion within 20 ms"),
+    });
+    expect(termination.error).toContain("closed with signal SIGKILL after forced helper cleanup");
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(helperKill).toHaveBeenCalledWith("SIGKILL");
+    expect(taskkill.unref).not.toHaveBeenCalled();
+  });
+
+  it("bounds an unobservable taskkill helper across both observation windows", async () => {
+    const child = fakeChild();
+    const taskkill = fakeTaskkill();
+    const taskkillSpawn = vi.fn(() => taskkill);
+    const started = Date.now();
+
+    const termination = await terminateProcessTree(child, "SIGKILL", {
+      platform: "win32",
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 20,
+    });
+
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(25);
+    expect(elapsed).toBeLessThan(300);
+    expect(termination).toMatchObject({
+      succeeded: false,
+      error: expect.stringContaining("remained unobservable for a further 20 ms and was unref'd"),
+    });
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(taskkillSpawn).toHaveBeenCalledWith(
+      "taskkill",
+      ["/PID", "4321", "/T", "/F"],
+      { shell: false, stdio: "ignore", windowsHide: true },
+    );
+    expect(taskkill.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(taskkill.unref).toHaveBeenCalledOnce();
   });
 
   it("does not interpolate invalid process identifiers into taskkill arguments", async () => {
@@ -356,6 +417,39 @@ describe("runValidation", () => {
     },
   );
 
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    it.skipIf(process.platform === "win32")(
+      `keeps escalation active when a SIGTERM parent exit leaves a descendant (attempt ${attempt}/10)`,
+      async () => {
+        const directory = await createTemporaryDirectory();
+        const parentMarker = join(directory, `exiting-parent-${attempt}`);
+        const descendantMarker = join(directory, `term-ignoring-descendant-${attempt}`);
+        const validation = runValidation(
+          childFixtureCommand(
+            "parent-exits-on-term-with-descendant",
+            parentMarker,
+            descendantMarker,
+          ),
+          directory,
+          { timeoutMs: 1_000, terminationGraceMs: 500 },
+        );
+        const parentPid = await readFixturePid(parentMarker);
+        const descendantPid = await readFixturePid(descendantMarker);
+        fixturePids.add(parentPid);
+        fixturePids.add(descendantPid);
+
+        const result = await validation;
+        expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 1_000 });
+        expect(result.terminationError).toBeUndefined();
+        await expect(readFile(parentMarker, "utf8")).resolves.toContain("TERM");
+        await expect(readFile(descendantMarker, "utf8")).resolves.toContain("TERM-IGNORED");
+        // This is deliberately immediate: resolution itself is the cleanup
+        // boundary, rather than a later best-effort background operation.
+        expect(isProcessRunning(descendantPid)).toBe(false);
+      },
+    );
+  }
+
   it.skipIf(process.platform !== "win32")(
     "cleans up Windows timed-out descendants with taskkill",
     async () => {
@@ -411,9 +505,9 @@ describe("runValidation", () => {
     expect(taskkillSpawn).toHaveBeenLastCalledWith(
       "taskkill",
       ["/PID", "4321", "/T", "/F"],
-      { shell: false, windowsHide: true },
+      { shell: false, stdio: "ignore", windowsHide: true },
     );
-    expect(spawnedTaskkill.every((taskkill) => (taskkill.unref as ReturnType<typeof vi.fn>).mock.calls.length === 1)).toBe(true);
+    expect(spawnedTaskkill.every((taskkill) => (taskkill.unref as ReturnType<typeof vi.fn>).mock.calls.length === 0)).toBe(true);
   });
 
   it("settles within a bounded post-kill period when Windows taskkill is unobservable", async () => {
@@ -442,7 +536,7 @@ describe("runValidation", () => {
     expect(taskkillSpawn).toHaveBeenLastCalledWith(
       "taskkill",
       ["/PID", "4321", "/T", "/F"],
-      { shell: false, windowsHide: true },
+      { shell: false, stdio: "ignore", windowsHide: true },
     );
     expect(child.kill).toHaveBeenCalledTimes(2);
     expect(child.unref).toHaveBeenCalledOnce();

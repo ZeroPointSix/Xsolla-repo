@@ -39,6 +39,8 @@ export type ValidationDependencies = {
   taskkillSpawn?: typeof spawn;
   /** Test seam for POSIX process-group signals. */
   killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Test seam for probing a negative POSIX process-group ID with signal zero. */
+  probeProcessGroup?: (processGroupId: number) => void;
   /** Bounds how long taskkill may remain unobservable before direct-child fallback. */
   taskkillObservationMs?: number;
   /** Bounds how long to await a child close after forced cleanup. */
@@ -57,6 +59,11 @@ export type ProcessTreeTerminationDependencies = Pick<
   ValidationDependencies,
   "platform" | "taskkillSpawn" | "killProcessGroup" | "taskkillObservationMs"
 >;
+
+type ProcessGroupProbe = {
+  absent: boolean;
+  error?: string;
+};
 
 export type ProcessTreeTermination = {
   succeeded: boolean;
@@ -438,6 +445,27 @@ function terminateDirectChild(child: ProcessTreeTarget, signal: NodeJS.Signals):
   }
 }
 
+function errnoIs(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+/** Probes the negative PGID: ESRCH is the only positive confirmation of absence. */
+function probePosixProcessGroup(
+  pid: number,
+  dependencies: Pick<ValidationDependencies, "probeProcessGroup">,
+): ProcessGroupProbe {
+  try {
+    (dependencies.probeProcessGroup ?? ((processGroupId) => process.kill(processGroupId, 0)))(-pid);
+    return { absent: false };
+  } catch (error) {
+    if (errnoIs(error, "ESRCH")) {
+      return { absent: true };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return { absent: false, error: message };
+  }
+}
+
 /**
  * Requests termination of the validation process tree and observes the request
  * rather than treating taskkill spawn as success. A Windows failure falls back
@@ -466,6 +494,9 @@ export function terminateProcessTree(
       (dependencies.killProcessGroup ?? process.kill)(-pid, signal);
       return Promise.resolve({ succeeded: true });
     } catch (error) {
+      if (errnoIs(error, "ESRCH")) {
+        return Promise.resolve({ succeeded: true });
+      }
       const message = error instanceof Error ? error.message : String(error);
       return Promise.resolve(
         failWithDirectChildFallback(`Could not signal process group ${pid} with ${signal}: ${message}`),
@@ -481,23 +512,35 @@ export function terminateProcessTree(
 
   return new Promise((resolve) => {
     let settled = false;
+    let reapingHelper = false;
     let observationTimer: NodeJS.Timeout | undefined;
+    let reapTimer: NodeJS.Timeout | undefined;
+    let fallback: ProcessTreeTermination | undefined;
     const settle = (result: ProcessTreeTermination) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(observationTimer);
+      clearTimeout(reapTimer);
       resolve(result);
     };
+    const helperFailure = (detail: string): ProcessTreeTermination => ({
+      succeeded: false,
+      error: `${fallback?.error ?? "taskkill helper became unobservable."} ${detail}`,
+    });
 
     try {
       const taskkill = (dependencies.taskkillSpawn ?? spawn)("taskkill", taskkillArgs, {
         shell: false,
+        stdio: "ignore",
         windowsHide: true,
       });
-      taskkill.unref();
       taskkill.once("error", (error: Error) => {
+        if (reapingHelper) {
+          settle(helperFailure(`taskkill helper emitted an error while being reaped: ${error.message}.`));
+          return;
+        }
         settle(
           failWithDirectChildFallback(
             `taskkill failed to start or execute for PID ${pid}: ${error.message}`,
@@ -505,20 +548,50 @@ export function terminateProcessTree(
         );
       });
       taskkill.once("close", (code: number | null, closeSignal: NodeJS.Signals | null) => {
+        const detail = closeSignal ? `signal ${closeSignal}` : `exit code ${code ?? "unavailable"}`;
+        if (reapingHelper) {
+          settle(helperFailure(`taskkill helper closed with ${detail} after forced helper cleanup.`));
+          return;
+        }
         if (code === 0) {
           settle({ succeeded: true });
           return;
         }
-        const detail = closeSignal ? `signal ${closeSignal}` : `exit code ${code ?? "unavailable"}`;
         settle(failWithDirectChildFallback(`taskkill for PID ${pid} ended with ${detail}`));
       });
-      observationTimer = unrefTimer(() => {
-        settle(
-          failWithDirectChildFallback(
-            `taskkill for PID ${pid} did not report completion within ${observationMs} ms`,
-          ),
+      // This timer deliberately remains referenced so the helper outcome is
+      // observed before validation cleanup is allowed to continue.
+      observationTimer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        reapingHelper = true;
+        fallback = failWithDirectChildFallback(
+          `taskkill for PID ${pid} did not report completion within ${observationMs} ms`,
         );
+        let helperKillDetail: string;
+        try {
+          helperKillDetail = taskkill.kill("SIGKILL")
+            ? "sent SIGKILL to the taskkill helper"
+            : "could not signal the taskkill helper with SIGKILL";
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          helperKillDetail = `could not signal the taskkill helper with SIGKILL: ${message}`;
+        }
+        // Give the killed helper one more bounded, referenced interval to close
+        // or error so it is reaped whenever that can be observed.
+        reapTimer = setTimeout(() => {
+          taskkill.unref();
+          settle(
+            helperFailure(
+              `${helperKillDetail}; taskkill helper remained unobservable for a further ${observationMs} ms and was unref'd without confirmation.`,
+            ),
+          );
+        }, observationMs);
       }, observationMs);
+      if (settled) {
+        clearTimeout(observationTimer);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       settle(failWithDirectChildFallback(`taskkill could not be spawned for PID ${pid}: ${message}`));
@@ -652,7 +725,14 @@ export async function runValidation(
     let initialTerminationCompleted = false;
     let forcedTerminationStarted = false;
     let forcedTerminationCompleted = false;
+    let posixProcessGroupAbsent = false;
+    let lastPosixProbeError: string | undefined;
     const terminationErrors: string[] = [];
+    const isPosix = platform !== "win32";
+    const processGroupPid =
+      typeof child.pid === "number" && Number.isSafeInteger(child.pid) && child.pid > 0
+        ? child.pid
+        : undefined;
     let timeoutTimer: NodeJS.Timeout | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
     let postKillTimer: NodeJS.Timeout | undefined;
@@ -673,11 +753,12 @@ export async function runValidation(
       }
     };
 
-    const timeoutResult = (unconfirmedCleanup = false) => {
-      if (unconfirmedCleanup) {
-        terminationErrors.push(
-          "Validation process did not close after forced cleanup; process-tree cleanup cannot be confirmed.",
-        );
+    const timeoutResult = (unconfirmedCleanupReason?: string) => {
+      if (settled) {
+        return;
+      }
+      if (unconfirmedCleanupReason) {
+        terminationErrors.push(unconfirmedCleanupReason);
         releaseUnconfirmedChild(child);
       }
       settle({
@@ -692,9 +773,34 @@ export async function runValidation(
       });
     };
 
+    const confirmPosixProcessGroupAbsent = (): boolean => {
+      if (!isPosix || posixProcessGroupAbsent) {
+        return posixProcessGroupAbsent;
+      }
+      if (processGroupPid === undefined) {
+        lastPosixProbeError = "Validation process has no valid PID for process-group cleanup.";
+        return false;
+      }
+      const probe = probePosixProcessGroup(processGroupPid, dependencies);
+      if (probe.absent) {
+        posixProcessGroupAbsent = true;
+        lastPosixProbeError = undefined;
+        return true;
+      }
+      lastPosixProbeError = probe.error;
+      return false;
+    };
+
     const maybeSettleTimedOut = () => {
       if (!timedOut || !childClosed) {
         return;
+      }
+      if (isPosix) {
+        // A direct-child close says nothing about detached descendants. Only an
+        // ESRCH probe of the negative PGID permits an early timeout result.
+        if (!confirmPosixProcessGroupAbsent()) {
+          return;
+        }
       }
       if (!forcedTerminationStarted && initialTerminationCompleted) {
         timeoutResult();
@@ -712,6 +818,44 @@ export async function runValidation(
         taskkillObservationMs: dependencies.taskkillObservationMs,
       });
 
+    const startPosixPostKillConfirmation = () => {
+      const followUpMs = boundedInternalDelay(
+        dependencies.postKillSettleMs,
+        VALIDATION_POST_KILL_SETTLE_MS,
+      );
+      const deadline = Date.now() + followUpMs;
+      const confirmUntilDeadline = () => {
+        if (settled) {
+          return;
+        }
+        if (confirmPosixProcessGroupAbsent()) {
+          forcedTerminationCompleted = true;
+          maybeSettleTimedOut();
+          if (!childClosed && !settled) {
+            postKillTimer = setTimeout(
+              () =>
+                timeoutResult(
+                  "Validation direct child did not close after its process group was killed; process-tree cleanup cannot be confirmed.",
+                ),
+              Math.max(1, deadline - Date.now()),
+            );
+          }
+          return;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          forcedTerminationCompleted = true;
+          const reason = lastPosixProbeError
+            ? `Could not confirm process group ${processGroupPid ?? "unavailable"} is absent after SIGKILL: ${lastPosixProbeError}.`
+            : `Process group ${processGroupPid ?? "unavailable"} remained after SIGKILL for ${followUpMs} ms.`;
+          timeoutResult(`${reason} Process-tree cleanup cannot be confirmed.`);
+          return;
+        }
+        postKillTimer = setTimeout(confirmUntilDeadline, Math.min(10, remaining));
+      };
+      confirmUntilDeadline();
+    };
+
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout.append(chunk);
     });
@@ -720,7 +864,9 @@ export async function runValidation(
     });
     child.once("error", (error: Error) => {
       if (timedOut) {
-        terminationErrors.push(`Validation child emitted an error during cleanup: ${error.message}`);
+        if (!settled) {
+          terminationErrors.push(`Validation child emitted an error during cleanup: ${error.message}`);
+        }
         return;
       }
       settle({
@@ -755,18 +901,27 @@ export async function runValidation(
         maybeSettleTimedOut();
       });
 
-      forceKillTimer = unrefTimer(() => {
-        if (settled || childClosed) {
+      // Keep this timer referenced: after SIGTERM the direct child can close
+      // while descendants still occupy its detached POSIX process group.
+      forceKillTimer = setTimeout(() => {
+        if (settled || (isPosix && posixProcessGroupAbsent)) {
           return;
         }
         forcedTerminationStarted = true;
         void requestTermination("SIGKILL").then((attempt) => {
-          forcedTerminationCompleted = true;
           recordTermination(attempt);
+          if (isPosix) {
+            startPosixPostKillConfirmation();
+            return;
+          }
+          forcedTerminationCompleted = true;
           maybeSettleTimedOut();
           if (!childClosed && !settled) {
-            postKillTimer = unrefTimer(
-              () => timeoutResult(true),
+            postKillTimer = setTimeout(
+              () =>
+                timeoutResult(
+                  "Validation process did not close after forced cleanup; process-tree cleanup cannot be confirmed.",
+                ),
               boundedInternalDelay(
                 dependencies.postKillSettleMs,
                 VALIDATION_POST_KILL_SETTLE_MS,
