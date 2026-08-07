@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,7 @@ import {
   GitReferenceError,
   GitRepositoryError,
   parseNameStatusNul,
+  parseUntrackedPorcelainNul,
   resolveBaseRef,
   type GitExecutor,
 } from "../src/git.js";
@@ -44,7 +45,10 @@ async function createRepository(initialBranch: string): Promise<RepositoryFixtur
   git(repositoryPath, "config", "user.email", "test@example.com");
   git(repositoryPath, "config", "user.name", "Test User");
   await writeFile(join(repositoryPath, "base.txt"), "base\n");
-  git(repositoryPath, "add", "base.txt");
+  await writeFile(join(repositoryPath, "duplicate path.txt"), "base duplicate\n");
+  await writeFile(join(repositoryPath, "unstaged file.txt"), "base unstaged\n");
+  await writeFile(join(repositoryPath, ".gitignore"), "ignored file.txt\nignored/\n");
+  git(repositoryPath, "add", "base.txt", "duplicate path.txt", "unstaged file.txt", ".gitignore");
   git(repositoryPath, "commit", "-m", "Initial commit");
   const baseCommit = git(repositoryPath, "rev-parse", "HEAD");
 
@@ -60,6 +64,42 @@ async function createDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "repository-inspector-non-git-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+type GitDiffLayers = {
+  committed?: string;
+  staged?: string;
+  unstaged?: string;
+  status?: string;
+};
+
+function executeGitDiffLayers({
+  committed = "",
+  staged = "",
+  unstaged = "",
+  status = "",
+}: GitDiffLayers): GitExecutor {
+  return (_repositoryPath, args) => {
+    if (args[0] === "rev-parse" && args[1] === "--git-dir") {
+      return ".git";
+    }
+    if (args[0] === "rev-parse" && args[1] === "--verify") {
+      return "base-commit";
+    }
+    if (args[0] === "diff" && args.includes("base-commit...HEAD")) {
+      return committed;
+    }
+    if (args[0] === "diff" && args.includes("--cached")) {
+      return staged;
+    }
+    if (args[0] === "diff") {
+      return unstaged;
+    }
+    if (args[0] === "status") {
+      return status;
+    }
+    throw new Error(`Unexpected Git command: ${args.join(" ")}`);
+  };
 }
 
 afterEach(async () => {
@@ -123,6 +163,20 @@ describe("NUL-delimited Git name-status parsing", () => {
       expect(() => parseNameStatusNul(output)).toThrow(GitNameStatusParseError);
     }
   });
+
+  it("extracts only untracked paths from porcelain records without splitting paths", () => {
+    const output = [
+      " M tracked file.txt",
+      "R  renamed destination.txt",
+      "?? source path that must be skipped.txt",
+      "?? 未跟踪 space file.txt",
+      "!! ignored file.txt",
+    ].join("\0") + "\0";
+
+    expect(parseUntrackedPorcelainNul(output)).toEqual([
+      { path: "未跟踪 space file.txt", status: "untracked" },
+    ]);
+  });
 });
 
 describe("Git base resolution", () => {
@@ -149,6 +203,50 @@ describe("Git base resolution", () => {
       previousPath: "base.txt",
       status: "copied",
     });
+  });
+
+  it("detects a staged copy from an unchanged tracked source", async () => {
+    const fixture = await createRepository("main");
+    await writeFile(join(fixture.repositoryPath, "staged-copy.txt"), "base\n");
+    git(fixture.repositoryPath, "add", "staged-copy.txt");
+
+    expect(changedFiles(fixture.repositoryPath, fixture.baseCommit)).toContainEqual({
+      path: "staged-copy.txt",
+      previousPath: "base.txt",
+      status: "copied",
+    });
+  });
+
+  it("combines committed and local changes into a sorted complete review view", async () => {
+    const fixture = await createRepository("main");
+
+    await writeFile(join(fixture.repositoryPath, "committed 中文 file.txt"), "committed\n");
+    git(fixture.repositoryPath, "add", "committed 中文 file.txt");
+    git(fixture.repositoryPath, "rm", "--", "duplicate path.txt");
+    git(fixture.repositoryPath, "commit", "-m", "Committed review changes");
+
+    await writeFile(join(fixture.repositoryPath, "duplicate path.txt"), "staged duplicate\n");
+    await writeFile(join(fixture.repositoryPath, "staged file.txt"), "staged\n");
+    git(fixture.repositoryPath, "add", "duplicate path.txt", "staged file.txt");
+
+    await writeFile(join(fixture.repositoryPath, "duplicate path.txt"), "unstaged duplicate\n");
+    await writeFile(join(fixture.repositoryPath, "unstaged file.txt"), "unstaged\n");
+    await writeFile(join(fixture.repositoryPath, "未跟踪 space file.txt"), "untracked\n");
+    await writeFile(join(fixture.repositoryPath, "ignored file.txt"), "ignored\n");
+    await mkdir(join(fixture.repositoryPath, "ignored"));
+    await writeFile(join(fixture.repositoryPath, "ignored", "nested file.txt"), "ignored\n");
+
+    const expected = [
+      { path: "committed 中文 file.txt", status: "added" as const },
+      { path: "duplicate path.txt", status: "modified" as const },
+      { path: "feature.txt", status: "added" as const },
+      { path: "staged file.txt", status: "added" as const },
+      { path: "unstaged file.txt", status: "modified" as const },
+      { path: "未跟踪 space file.txt", status: "untracked" as const },
+    ];
+
+    expect(changedFiles(fixture.repositoryPath, fixture.baseCommit)).toEqual(expected);
+    expect(changedFiles(fixture.repositoryPath, fixture.baseCommit)).toEqual(expected);
   });
 
   it("uses refs/remotes/origin/HEAD instead of a tag named origin/HEAD", async () => {
@@ -232,7 +330,7 @@ describe("Git base resolution", () => {
     );
   });
 
-  it("uses end-of-options commit verification, a bounded buffer, and a diff separator", async () => {
+  it("uses NUL-safe Git commands with end-of-options and a bounded buffer", async () => {
     const fixture = await createRepository("main");
     const calls: string[][] = [];
     const buffers: number[] = [];
@@ -245,14 +343,24 @@ describe("Git base resolution", () => {
       if (args[0] === "rev-parse" && args[1] === "--verify") {
         return "base-commit";
       }
-      if (args[0] === "diff") {
+      if (args[0] === "diff" && args.includes("base-commit...HEAD")) {
         return "A\0feature.txt\0";
+      }
+      if (args[0] === "diff" && args.includes("--cached")) {
+        return "M\0feature.txt\0";
+      }
+      if (args[0] === "diff") {
+        return "T\0feature.txt\0";
+      }
+      if (args[0] === "status") {
+        return "?? untracked file.txt\0";
       }
       throw new Error(`Unexpected Git command: ${args.join(" ")}`);
     };
 
     expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual([
-      { path: "feature.txt", status: "added" },
+      { path: "feature.txt", status: "type_changed" },
+      { path: "untracked file.txt", status: "untracked" },
     ]);
     expect(calls).toEqual([
       ["rev-parse", "--git-dir"],
@@ -267,8 +375,142 @@ describe("Git base resolution", () => {
         "base-commit...HEAD",
         "--",
       ],
+      [
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        "--find-copies-harder",
+        "--cached",
+        "--",
+      ],
+      ["diff", "--name-status", "-z", "--find-renames", "--find-copies", "--"],
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--"],
     ]);
-    expect(buffers).toEqual([GIT_MAX_BUFFER_BYTES, GIT_MAX_BUFFER_BYTES, GIT_MAX_BUFFER_BYTES]);
+    expect(buffers).toEqual(Array(6).fill(GIT_MAX_BUFFER_BYTES));
+  });
+
+  it("preserves effective rename and copy source paths while applying precedence", async () => {
+    const fixture = await createRepository("main");
+    const execute: GitExecutor = (_repositoryPath, args) => {
+      if (args[0] === "rev-parse" && args[1] === "--git-dir") {
+        return ".git";
+      }
+      if (args[0] === "rev-parse" && args[1] === "--verify") {
+        return "base-commit";
+      }
+      if (args[0] === "diff" && args.includes("base-commit...HEAD")) {
+        return [
+          "R100",
+          "committed old.txt",
+          "committed renamed.txt",
+          "C100",
+          "copy source.txt",
+          "copy destination.txt",
+          "A",
+          "overridden.txt",
+        ].join("\0") + "\0";
+      }
+      if (args[0] === "diff" && args.includes("--cached")) {
+        return ["C100", "staged source.txt", "staged copy.txt"].join("\0") + "\0";
+      }
+      if (args[0] === "diff") {
+        return "M\0overridden.txt\0";
+      }
+      if (args[0] === "status") {
+        return "?? overridden.txt\0?? untracked file.txt\0";
+      }
+      throw new Error(`Unexpected Git command: ${args.join(" ")}`);
+    };
+
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual([
+      {
+        path: "committed renamed.txt",
+        previousPath: "committed old.txt",
+        status: "renamed",
+      },
+      {
+        path: "copy destination.txt",
+        previousPath: "copy source.txt",
+        status: "copied",
+      },
+      { path: "overridden.txt", status: "modified" },
+      {
+        path: "staged copy.txt",
+        previousPath: "staged source.txt",
+        status: "copied",
+      },
+      { path: "untracked file.txt", status: "untracked" },
+    ]);
+  });
+
+  it("composes a committed-to-staged rename chain into one final current path", async () => {
+    const fixture = await createRepository("main");
+    const execute = executeGitDiffLayers({
+      committed: ["R100", "original.txt", "intermediate.txt"].join("\0") + "\0",
+      staged: ["R100", "intermediate.txt", "final.txt"].join("\0") + "\0",
+    });
+
+    const expected = [
+      { path: "final.txt", previousPath: "original.txt", status: "renamed" as const },
+    ];
+
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual(expected);
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual(expected);
+  });
+
+  it("composes a staged-to-unstaged rename chain into one final current path", async () => {
+    const fixture = await createRepository("main");
+    const execute = executeGitDiffLayers({
+      staged: ["R100", "original.txt", "staged.txt"].join("\0") + "\0",
+      unstaged: ["R100", "staged.txt", "final.txt"].join("\0") + "\0",
+    });
+
+    const expected = [
+      { path: "final.txt", previousPath: "original.txt", status: "renamed" as const },
+    ];
+
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual(expected);
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual(expected);
+  });
+
+  it("keeps an effective copy source while composing its destination rename", async () => {
+    const fixture = await createRepository("main");
+    const execute = executeGitDiffLayers({
+      committed:
+        [
+          "M",
+          "copy source.txt",
+          "C100",
+          "copy source.txt",
+          "copy destination.txt",
+        ].join("\0") + "\0",
+      staged: ["R100", "copy destination.txt", "renamed copy.txt"].join("\0") + "\0",
+    });
+
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual([
+      { path: "copy source.txt", status: "modified" },
+      {
+        path: "renamed copy.txt",
+        previousPath: "copy source.txt",
+        status: "copied",
+      },
+    ]);
+  });
+
+  it("lets untracked files replace committed and staged deletions at the same path", async () => {
+    const fixture = await createRepository("main");
+    const execute = executeGitDiffLayers({
+      committed: ["D", "committed-recreated.txt"].join("\0") + "\0",
+      staged: ["D", "staged-recreated.txt"].join("\0") + "\0",
+      status: ["?? committed-recreated.txt", "?? staged-recreated.txt"].join("\0") + "\0",
+    });
+
+    expect(changedFiles(fixture.repositoryPath, "topic", { execute })).toEqual([
+      { path: "committed-recreated.txt", status: "untracked" },
+      { path: "staged-recreated.txt", status: "untracked" },
+    ]);
   });
 
   it("normalizes an unexpected Git command failure", async () => {
