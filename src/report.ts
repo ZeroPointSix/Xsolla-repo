@@ -2,7 +2,10 @@ import type {
   ChangedFile,
   ReviewResult,
   ValidationOutputTruncation,
+  ValidationResult,
 } from "./types.js";
+
+const validationStatuses = ["passed", "failed", "error", "timed_out"] as const;
 
 function truncationDiagnostic(
   stream: "stdout" | "stderr",
@@ -71,43 +74,86 @@ function changedFileLine(file: ChangedFile): string {
   return `${path} (${file.status})`;
 }
 
+function backtickFence(value: string): string {
+  const longestRun = Math.max(
+    0,
+    ...Array.from(value.matchAll(/`+/g), (match) => match[0].length),
+  );
+  return "`".repeat(Math.max(3, longestRun + 1));
+}
+
+function inlineCode(value: string): string {
+  const fence = backtickFence(value);
+  return `${fence} ${value} ${fence}`;
+}
+
+function fencedCodeBlock(value: string): string {
+  const fence = backtickFence(value);
+  return `${fence}\n${value}\n${fence}`;
+}
+
+function validationSummary(results: ValidationResult[]): string {
+  const counts = Object.fromEntries(
+    validationStatuses.map((status) => [status, 0]),
+  ) as Record<ValidationResult["status"], number>;
+
+  for (const result of results) {
+    counts[result.status] += 1;
+  }
+
+  return `- Validation results: ${results.length} total (passed: ${counts.passed}, failed: ${counts.failed}, error: ${counts.error}, timed_out: ${counts.timed_out})`;
+}
+
 export function markdownReport(input: ReviewResult): string {
   const lines = [
-    `# Review Report: ${formatMarkdownPath(input.repositoryPath)}`,
+    "# Review Report",
+    "",
+    "## Summary",
+    `- Changed files: ${input.changedFiles.length}`,
+    validationSummary(input.validationResults),
     "",
     "## Changed files",
   ];
-  for (const file of input.changedFiles) {
-    lines.push(`- ${changedFileLine(file)}`);
+  if (input.changedFiles.length === 0) {
+    lines.push("No changed files detected.");
+  } else {
+    for (const file of input.changedFiles) {
+      lines.push(`- ${changedFileLine(file)}`);
+    }
   }
+
   lines.push("", "## Validation output");
-  for (const result of input.validationResults) {
-    lines.push(
-      `### ${result.command}`,
-      `- Status: ${result.status}`,
-      `- Exit code: ${result.exitCode ?? "unavailable"}`,
-    );
-    if (result.signal) {
-      lines.push(`- Signal: ${result.signal}`);
-    }
-    if (result.status === "timed_out" && result.timeoutMs) {
-      lines.push(`- Timeout: exceeded ${result.timeoutMs} ms.`);
-    }
-    if (result.terminationError) {
-      lines.push(`- Termination cleanup: ${result.terminationError}`);
-    }
-    const stdoutDiagnostic = truncationDiagnostic("stdout", result.stdoutTruncation);
-    if (stdoutDiagnostic) {
-      lines.push(stdoutDiagnostic);
-    }
-    lines.push("#### stdout", "```", result.stdout, "```");
-    const stderrDiagnostic = truncationDiagnostic("stderr", result.stderrTruncation);
-    if (stderrDiagnostic) {
-      lines.push(stderrDiagnostic);
-    }
-    lines.push("#### stderr", "```", result.stderr, "```");
-    if (result.error) {
-      lines.push("- Execution error:", "```", result.error, "```");
+  if (input.validationResults.length === 0) {
+    lines.push("No validation commands were run.");
+  } else {
+    for (const result of input.validationResults) {
+      lines.push(
+        `### Command: ${inlineCode(result.command)}`,
+        `- Status: ${result.status}`,
+        `- Exit code: ${result.exitCode ?? "unavailable"}`,
+      );
+      if (result.signal) {
+        lines.push(`- Signal: ${result.signal}`);
+      }
+      if (result.status === "timed_out" && result.timeoutMs) {
+        lines.push(`- Timeout: exceeded ${result.timeoutMs} ms.`);
+      }
+      if (result.terminationError) {
+        lines.push(`- Termination cleanup: ${result.terminationError}`);
+      }
+      const stdoutDiagnostic = truncationDiagnostic("stdout", result.stdoutTruncation);
+      if (stdoutDiagnostic) {
+        lines.push(stdoutDiagnostic);
+      }
+      lines.push("#### stdout", fencedCodeBlock(result.stdout));
+      const stderrDiagnostic = truncationDiagnostic("stderr", result.stderrTruncation);
+      if (stderrDiagnostic) {
+        lines.push(stderrDiagnostic);
+      }
+      lines.push("#### stderr", fencedCodeBlock(result.stderr));
+      if (result.error) {
+        lines.push("- Execution error:", fencedCodeBlock(result.error));
+      }
     }
   }
   return lines.join("\n");

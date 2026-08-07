@@ -104,7 +104,7 @@ describe("CLI", () => {
     expect(existsSync(join(outputDirectory, "review-report.json"))).toBe(false);
 
     const report = await readFile(join(outputDirectory, "review-report.md"), "utf8");
-    expect(report).toContain("# Review Report:");
+    expect(report).toContain("# Review Report\n");
     expect(report).toContain("feature.txt (added)");
     expect(report).toContain("Markdown validation");
   });
