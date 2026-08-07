@@ -35,10 +35,10 @@ The CLI runs with the invoking developer's local permissions. In particular,
 an optional validation command is executable code selected by that developer;
 the production contract therefore assumes the developer makes that decision in
 their own shell context. The retained MCP source does not provide a safe
-alternative trust boundary: its path mapping is not yet corrected by Issue #1,
-and Issues #4 and #5 have not yet provided shellless, allowlisted,
-root-confined, resource-bounded execution. This docs-only PR does not implement
-any of those unfinished safeguards.
+alternative trust boundary: Issue #1 has not implemented typed repository-path
+mapping, Issue #4 has not implemented a shellless, allowlisted validation
+policy, and Issue #5 has not implemented timeout and output bounds. This
+docs-only PR does not implement any of those unfinished safeguards.
 
 ### Reliability, discoverability, latency/context, and output-size tradeoffs
 
@@ -55,18 +55,20 @@ discoverability, or output-size commitment.
 
 Only the CLI has a production behavior guarantee. There is no supported MCP
 behavior, availability, or parity claim. Any future MCP interface must first
-implement the unfinished #1, #4, and #5 safeguards and then be specified and
-documented against the CLI.
+implement Issue #1's typed repository-path mapping, Issue #4's shellless,
+allowlisted validation policy, and Issue #5's timeout and output bounds, then
+be specified and documented against the CLI.
 
 ### Evidence that would change the decision
 
 This decision would be reconsidered only if sustained, representative usage
 showed that agent-driven requests are the dominant production workflow and an
-agent-facing interface could enforce the required path mapping plus shellless,
-allowlisted, root-confined, resource-bounded execution. It would also require
-evidence that bounded/structured results solve the agent context and
-output-size problem and that the interface meets measurable reliability and
-latency targets. Until then, the CLI remains the only production contract.
+agent-facing interface could enforce typed repository-path mapping, a
+shellless, allowlisted validation policy, and timeout and output bounds. It
+would also require evidence that bounded/structured results solve the agent
+context and output-size problem and that the interface meets measurable
+reliability and latency targets. Until then, the CLI remains the only production
+contract.
 
 ## Time and rules
 
@@ -102,10 +104,10 @@ only, not as startup or tool-use instructions. Do not start, register, connect
 to, or invoke this MCP source for agent experiments, automation, or any
 untrusted use.
 
-It remains unavailable until Issue #1 corrects the repository-path mapping and
-Issues #4 and #5 enforce shellless, allowlisted, root-confined,
-resource-bounded execution. Those changes are unfinished and are explicitly
-outside this docs-only PR.
+It remains unavailable until Issue #1 implements typed repository-path mapping,
+Issue #4 implements a shellless, allowlisted validation policy, and Issue #5
+implements timeout and output bounds. Those changes are unfinished and are
+explicitly outside this docs-only PR.
 
 ## Project layout
 
