@@ -19,6 +19,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
-      - run: node ./dist/cli.js review --help
+      - run: npm run smoke:installed-cli
+      - run: npm run smoke:compiled-mcp
       - run: npm test
       - run: npm audit --omit=dev --package-lock-only

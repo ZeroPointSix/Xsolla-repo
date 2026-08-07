@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "A repository review tool with CLI and MCP interfaces.",
+  "files": [
+    "dist"
+  ],
   "bin": {
     "inspector": "./dist/cli.js"
   },
@@ -12,6 +15,8 @@
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     "inspector": "tsx src/cli.ts",
     "mcp-server": "tsx src/mcp-server.ts",
+    "smoke:installed-cli": "node scripts/smoke-installed-cli.mjs",
+    "smoke:compiled-mcp": "node scripts/smoke-compiled-mcp.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test"
@@ -22,7 +27,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
-    "eslint": "^10.8.1",
+    "eslint": "^9.39.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.66.0",
