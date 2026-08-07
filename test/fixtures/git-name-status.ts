@@ -26,3 +26,24 @@ export const malformedNameStatusOutputs = [
   "X\0unknown-status.ts\0",
   "A\0missing-terminal.ts",
 ];
+
+export const interleavedMalformedNameStatusOutput = [
+  "",
+  "X",
+  "not-a-status",
+  "M",
+  "",
+  "R100",
+  "renames/lost-source.ts",
+  "",
+  "C75",
+  "copies/lost-source.ts",
+  "",
+  "A",
+  "added.ts",
+  "R100",
+  "renames/old.ts",
+  "renames/new.ts",
+  "M",
+  "modified.ts",
+].join(nul) + nul;

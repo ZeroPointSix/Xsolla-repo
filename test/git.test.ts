@@ -16,6 +16,7 @@ import {
 } from "../src/git.js";
 import {
   completeNameStatusOutput,
+  interleavedMalformedNameStatusOutput,
   malformedNameStatusOutputs,
 } from "./fixtures/git-name-status.js";
 
@@ -94,6 +95,35 @@ describe("NUL-delimited Git name-status parsing", () => {
       expect(parseNameStatusNul(output)).toEqual([]);
     }
   });
+
+  it("recovers valid records interleaved with empty, unknown, and truncated records", () => {
+    expect(parseNameStatusNul(interleavedMalformedNameStatusOutput)).toEqual([
+      { path: "added.ts", status: "added" },
+      {
+        path: "renames/new.ts",
+        previousPath: "renames/old.ts",
+        status: "renamed",
+      },
+      { path: "modified.ts", status: "modified" },
+    ]);
+  });
+
+  it("keeps a valid record after fuzzed malformed prefixes", () => {
+    let state = 0x5eed1234;
+    const malformedTokens = ["", "X", "M", "R100", "C75", "not-a-status", "\t", "\n"];
+    const next = () => {
+      state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+      return state;
+    };
+
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      const prefix = Array.from({ length: next() % 12 }, () => malformedTokens[next() % malformedTokens.length]!);
+      const path = `recovered-${iteration}.ts`;
+      const output = [...prefix, "", "A", path].join("\0") + "\0";
+
+      expect(parseNameStatusNul(output)).toContainEqual({ path, status: "added" });
+    }
+  });
 });
 
 describe("Git base resolution", () => {
@@ -107,6 +137,19 @@ describe("Git base resolution", () => {
     expect(changedFiles(fixture.repositoryPath)).toEqual([
       { path: "feature.txt", status: "added" },
     ]);
+  });
+
+  it("detects copies from unchanged tracked sources", async () => {
+    const fixture = await createRepository("main");
+    await writeFile(join(fixture.repositoryPath, "copied-base.txt"), "base\n");
+    git(fixture.repositoryPath, "add", "copied-base.txt");
+    git(fixture.repositoryPath, "commit", "-m", "Copy unchanged base file");
+
+    expect(changedFiles(fixture.repositoryPath, fixture.baseCommit)).toContainEqual({
+      path: "copied-base.txt",
+      previousPath: "base.txt",
+      status: "copied",
+    });
   });
 
   it("uses refs/remotes/origin/HEAD instead of a tag named origin/HEAD", async () => {
@@ -221,6 +264,7 @@ describe("Git base resolution", () => {
         "-z",
         "--find-renames",
         "--find-copies",
+        "--find-copies-harder",
         "base-commit...HEAD",
         "--",
       ],

@@ -17,11 +17,60 @@ function truncationDiagnostic(
   return `- ${stream} truncated: retained ${truncation.capturedBytes} source bytes and omitted ${truncation.omittedBytes} source bytes.`;
 }
 
-function changedFileLine(file: ChangedFile): string {
-  if (file.status === "renamed" || file.status === "copied") {
-    return `${file.status}: ${file.previousPath} → ${file.path}`;
+const markdownPathMetacharacters = new Set([
+  "\\",
+  "`",
+  "*",
+  "_",
+  "{",
+  "}",
+  "[",
+  "]",
+  "<",
+  ">",
+  "(",
+  ")",
+  "#",
+  "+",
+  "!",
+  "&",
+  "|",
+  "~",
+]);
+
+function escapedControlCharacter(character: string): string | undefined {
+  switch (character) {
+    case "\n":
+      return "\\n";
+    case "\r":
+      return "\\r";
+    case "\t":
+      return "\\t";
   }
-  return `${file.path} (${file.status})`;
+
+  if (/\p{Cc}|\p{Zl}|\p{Zp}/u.test(character)) {
+    return `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`;
+  }
+  return undefined;
+}
+
+/** Formats an arbitrary filesystem path as one safe Markdown text fragment. */
+function formatMarkdownPath(path: string): string {
+  return Array.from(path, (character) => {
+    const escapedControl = escapedControlCharacter(character);
+    if (escapedControl) {
+      return escapedControl;
+    }
+    return markdownPathMetacharacters.has(character) ? `\\${character}` : character;
+  }).join("");
+}
+
+function changedFileLine(file: ChangedFile): string {
+  const path = formatMarkdownPath(file.path);
+  if (file.status === "renamed" || file.status === "copied") {
+    return `${file.status}: ${formatMarkdownPath(file.previousPath)} → ${path}`;
+  }
+  return `${path} (${file.status})`;
 }
 
 export function markdownReport(input: ReportInput): string {

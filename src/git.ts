@@ -4,6 +4,13 @@ import type { ChangedFile } from "./types.js";
 
 export const GIT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
+type NameStatusRecord =
+  | {
+      arity: 1;
+      status: "added" | "deleted" | "modified" | "type_changed" | "unmerged";
+    }
+  | { arity: 2; status: "renamed" | "copied" };
+
 type GitExecutionOptions = {
   maxBuffer: number;
 };
@@ -219,54 +226,69 @@ export function resolveBaseRef(
   );
 }
 
+function nameStatusRecord(token: string): NameStatusRecord | undefined {
+  switch (token) {
+    case "A":
+      return { arity: 1, status: "added" };
+    case "D":
+      return { arity: 1, status: "deleted" };
+    case "M":
+      return { arity: 1, status: "modified" };
+    case "T":
+      return { arity: 1, status: "type_changed" };
+    case "U":
+      return { arity: 1, status: "unmerged" };
+  }
+
+  const similarity = token.slice(1);
+  if (!/^\d{1,3}$/.test(similarity) || Number(similarity) > 100) {
+    return undefined;
+  }
+  if (token.startsWith("R")) {
+    return { arity: 2, status: "renamed" };
+  }
+  if (token.startsWith("C")) {
+    return { arity: 2, status: "copied" };
+  }
+  return undefined;
+}
+
 /**
  * Parses Git's NUL-delimited `--name-status -z` output without altering paths.
  * Malformed records are ignored rather than being joined into invalid file paths.
  */
 export function parseNameStatusNul(output: string): ChangedFile[] {
+  // A final non-NUL-terminated field may have been truncated, so it cannot be
+  // part of a complete record. When output is complete, this removes its NUL
+  // sentinel instead.
   const fields = output.split("\0").slice(0, -1);
   const files: ChangedFile[] = [];
   let index = 0;
   while (index < fields.length) {
-    const code = fields[index++] ?? "";
-    const statusCode = code[0];
+    const record = nameStatusRecord(fields[index] ?? "");
+    if (!record) {
+      index += 1;
+      continue;
+    }
 
-    if (statusCode === "R" || statusCode === "C") {
-      const previousPath = fields[index++];
-      const path = fields[index++];
-      if (!previousPath || !path) {
-        continue;
-      }
+    const paths = fields.slice(index + 1, index + 1 + record.arity);
+    if (paths.length !== record.arity || paths.some((path) => !path)) {
+      // Advance only past the status token so a subsequent well-formed record
+      // is not swallowed while recovering from malformed input.
+      index += 1;
+      continue;
+    }
+
+    if (record.arity === 1) {
+      files.push({ path: paths[0]!, status: record.status });
+    } else {
       files.push({
-        path,
-        previousPath,
-        status: statusCode === "R" ? "renamed" : "copied",
+        path: paths[1]!,
+        previousPath: paths[0]!,
+        status: record.status,
       });
-      continue;
     }
-
-    const path = fields[index++];
-    if (!path) {
-      continue;
-    }
-
-    switch (statusCode) {
-      case "A":
-        files.push({ path, status: "added" });
-        break;
-      case "D":
-        files.push({ path, status: "deleted" });
-        break;
-      case "M":
-        files.push({ path, status: "modified" });
-        break;
-      case "T":
-        files.push({ path, status: "type_changed" });
-        break;
-      case "U":
-        files.push({ path, status: "unmerged" });
-        break;
-    }
+    index += record.arity + 1;
   }
 
   return files;
@@ -290,6 +312,7 @@ export function changedFiles(
         "-z",
         "--find-renames",
         "--find-copies",
+        "--find-copies-harder",
         `${base}...HEAD`,
         "--",
       ],
