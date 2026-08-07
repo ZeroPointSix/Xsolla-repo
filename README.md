@@ -1,8 +1,9 @@
 # Repository Inspector
 
 This is a small TypeScript developer tool that inspects changes in a Git
-repository, runs optional validation commands, and produces a Markdown report.
-Its sole production interface is the command line. The bundled stdio MCP
+repository, runs optional validation commands, and produces a typed review
+result. Its CLI writes that result as Markdown or JSON. Its sole production
+interface is the command line. The bundled stdio MCP
 source is an experimental compatibility interface with a constrained execution
 policy; it is not a production interface.
 
@@ -112,6 +113,7 @@ npm test
 
 ```bash
 npm run inspector -- review --repo ./path/to/repo --format markdown
+npm run inspector -- review --repo ./path/to/repo --format json
 npm run inspector -- review --repo ./path/to/repo --validate "npm test"
 ```
 
@@ -154,7 +156,11 @@ their final destination; effective rename and copy entries retain the earliest
 source path and copy status. The resulting entries are sorted lexicographically
 by current path for deterministic reports.
 
-The report is written to `review-report.md`.
+By default, the CLI writes a Markdown report to `review-report.md`. Passing
+`--format json` instead writes a parseable JSON serialization of the same typed
+review result to `review-report.json`; it does not also create a Markdown file.
+Both files are written to the invoking directory, while stdout only names the
+written report.
 
 ## Retained experimental MCP source
 
@@ -166,8 +172,10 @@ validation-command allowlist and the only opt-in that broadens it are documented
 in the trust-boundary section above. The implementation never invokes a shell.
 
 The interface remains experimental despite its 15-second timeout and 32 KiB
-per-stream output bounds. Do not treat its constrained policy as a substitute
-for a general-purpose agent command-execution boundary.
+per-stream output bounds. Successful MCP calls expose the same typed review
+result through `structuredContent` and return only a bounded plain-text summary
+for humans. Do not treat its constrained policy as a substitute for a
+general-purpose agent command-execution boundary.
 
 ## Project layout
 
@@ -177,7 +185,7 @@ src/cli.ts          command-line adapter
 src/mcp-server.ts   MCP adapter
 src/git.ts          Git inspection
 src/validation.ts   validation execution
-src/report.ts       Markdown report generation
+src/report.ts       Markdown result renderer
 test/               public starter tests
 ```
 

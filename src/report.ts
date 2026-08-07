@@ -1,10 +1,8 @@
-import type { ChangedFile, ValidationOutputTruncation, ValidationResult } from "./types.js";
-
-type ReportInput = {
-  repositoryPath: string;
-  changedFiles: ChangedFile[];
-  validationResults: ValidationResult[];
-};
+import type {
+  ChangedFile,
+  ReviewResult,
+  ValidationOutputTruncation,
+} from "./types.js";
 
 function truncationDiagnostic(
   stream: "stdout" | "stderr",
@@ -73,7 +71,7 @@ function changedFileLine(file: ChangedFile): string {
   return `${path} (${file.status})`;
 }
 
-export function markdownReport(input: ReportInput): string {
+export function markdownReport(input: ReviewResult): string {
   const lines = [
     `# Review Report: ${formatMarkdownPath(input.repositoryPath)}`,
     "",
