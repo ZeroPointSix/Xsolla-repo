@@ -8,7 +8,8 @@
     "inspector": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     "inspector": "tsx src/cli.ts",
     "mcp-server": "tsx src/mcp-server.ts",
     "test": "vitest run",
