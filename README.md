@@ -1,47 +1,65 @@
 # Repository Inspector
 
-This is a small TypeScript developer tool that inspects changes in a Git
-repository, runs optional validation commands, and produces a Markdown report.
-It can be used from a command line or exposed to AI clients through MCP.
+Repository Inspector is a small TypeScript tool. It finds changes in a Git
+repository, runs optional validation commands, and creates a bounded review
+report. It has a CLI and an MCP stdio server.
 
-## Your task
+## Interface decision: hybrid
 
-Investigate the repository and improve it as you judge best. The starter works
-for a narrow happy path, but production use may expose correctness, safety,
-reliability, contract, output, documentation, or testing weaknesses.
+The core returns one structured `ReviewResult`. The CLI and MCP server are thin
+adapters around that result.
 
-You are not expected to finish everything. We care about how you investigate,
-prioritize, implement, verify, and explain a meaningful scope.
+- The CLI is for a developer at a local terminal or in CI. It can run any
+  explicit executable and argument list, but it does not use a shell.
+- MCP is for an AI coding agent in a local stdio process. It limits repository
+  roots, validation commands, run time, and output size.
+- Both interfaces use the same Git inspection, validation, and report data.
+- The CLI can write full Markdown or JSON. MCP returns `structuredContent` and
+  a bounded Markdown view of the same result.
 
-## Product decision
+This choice would change if usage data showed that one interface handles almost
+all real work. It would also change if MCP always ran inside a disposable,
+isolated sandbox with a separate permission prompt for each command.
 
-This tool may be used directly by developers and by AI coding agents. Decide
-whether its production interface should be **CLI-first**, **MCP-first**, or
-**hybrid**. Implement improvements consistent with your decision.
+## Trust boundary
 
-There is no preferred label. Explain:
+Validation commands execute with the permissions of this process. The runner
+uses `spawn` with `shell: false`; shell operators, pipelines, redirects, and
+expansion are not supported.
 
-- The primary user and execution environment you assumed.
-- The trust boundary and allowed capabilities.
-- Reliability, discoverability, latency/context, and output-size tradeoffs.
-- How the interfaces you continue to advertise stay behaviorally consistent.
-- What evidence would change your decision.
+The CLI treats the local user as trusted because the user already controls the
+terminal. MCP treats its caller as untrusted:
 
-## Time and rules
+- `INSPECTOR_MCP_ALLOWED_ROOTS` is a platform-delimited list of allowed root
+  directories. The default is the server working directory.
+- `INSPECTOR_MCP_ALLOWED_COMMANDS` is a comma-delimited exact allowlist. The
+  default allows `npm test`, `npm run test`, `npm run typecheck`,
+  `npm run lint`, and `npm run build`.
+- MCP accepts at most 10 validation commands, uses a 15 second default timeout,
+  and keeps at most 32 KiB from each output stream.
 
-- Maximum **90 focused minutes** within 48 hours of receiving the invitation.
-- Use AI coding tools freely. Verify their work and document at least one
-  suggestion you corrected or rejected.
-- Work in your own repository created from this template.
-- Commit as you work and complete `SUBMISSION.md` in your final commit.
-- Completion is not required. Accurate scope and verification matter more than
-  a large diff.
+Only set broader roots or commands when the MCP server runs in an isolated
+environment that you control.
+
+## Git inspection
+
+The tool validates the repository and base ref before it runs a diff. If no
+base ref is provided, it tries the current upstream, `origin/HEAD`, `main`, and
+`master`, in that order. It reports:
+
+- committed changes from the merge base to `HEAD`;
+- staged and unstaged changes;
+- untracked files;
+- add, modify, delete, rename, copy, type-change, and conflict states.
+
+Git output uses NUL delimiters, so spaces and non-ASCII file names are kept.
 
 ## Setup
 
 ```bash
-npm install
+npm ci
 npm run typecheck
+npm run build
 npm test
 ```
 
@@ -50,9 +68,12 @@ npm test
 ```bash
 npm run inspector -- review --repo ./path/to/repo --format markdown
 npm run inspector -- review --repo ./path/to/repo --validate "npm test"
+npm run inspector -- review --repo ./path/to/repo --format json --output -
 ```
 
-The report is written to `review-report.md`.
+Run `npm run inspector -- --help` for all options. A failed, timed-out, or
+unstartable validation is included in the report. The CLI then exits with code
+2. Usage and tool errors use exit code 1.
 
 ## MCP
 
@@ -62,22 +83,34 @@ Start the stdio server with:
 npm run mcp-server
 ```
 
-It exposes a `review_repository` tool. Inspect the implementation to determine
-its current input contract and whether it is suitable for the production model
-you propose.
+It exposes `review_repository` with one naming style:
 
-## Project layout
+- `repo_path` (required)
+- `base_ref`
+- `validation_commands`
+- `timeout_ms`
+- `max_output_bytes`
 
-```text
-src/core.ts         shared review orchestration
-src/cli.ts          command-line adapter
-src/mcp-server.ts   MCP adapter
-src/git.ts          Git inspection
-src/validation.ts   validation execution
-src/report.ts       Markdown report generation
-test/               public starter tests
-```
+## Output limits
 
-When finished, submit via **Security → Report a vulnerability** on this
-repo — see `SECURITY.md` for exactly what to include. Do not reply by email;
-that submission channel is not monitored.
+The validation runner streams output instead of using `exec` buffers. It keeps
+the start and end of large output and adds an omission marker. The CLI defaults
+to 60 seconds and 256 KiB per stream. MCP uses stricter limits. Both can lower
+or raise limits within their documented boundaries.
+
+## Dependency note
+
+`@hono/node-server` is a real transitive dependency of
+`@modelcontextprotocol/sdk`. The override to `2.0.10` is retained on purpose;
+the SDK currently declares `^1.19.9`. Remove the override only after the SDK
+supports the selected major version directly and the MCP tests pass without it.
+
+## Assessment task
+
+This repository started as the Xsolla AI-First Engineering Intern assessment.
+The work is time-boxed to 90 focused minutes. Accurate scope and verification
+matter more than a large diff. Complete `SUBMISSION.md` in the final commit.
+
+Submit through **Security -> Report a vulnerability** as described in
+`SECURITY.md`. That form needs the candidate's name, application email, and
+repository URL.

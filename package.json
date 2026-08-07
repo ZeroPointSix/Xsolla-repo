@@ -1,6 +1,6 @@
 {
   "name": "ai-repo-inspector-assessment-v2",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "description": "A repository review tool with CLI and MCP interfaces.",
@@ -8,7 +8,8 @@
     "inspector": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "inspector": "tsx src/cli.ts",
     "mcp-server": "tsx src/mcp-server.ts",
     "test": "vitest run",
