@@ -31,6 +31,21 @@ describe("markdownReport", () => {
     expect(report).toContain("standard error");
   });
 
+  it("renders renamed and copied files as separate source and destination paths", () => {
+    const report = markdownReport({
+      repositoryPath: "/work/sample",
+      changedFiles: [
+        { path: "new", previousPath: "old", status: "renamed" },
+        { path: "copy new", previousPath: "copy old", status: "copied" },
+      ],
+      validationResults: [],
+    });
+
+    expect(report).toContain("- renamed: old → new");
+    expect(report).toContain("- copied: copy old → copy new");
+    expect(report).not.toContain("old\tnew");
+  });
+
   it("reports timeout and stream-truncation diagnostics", () => {
     const report = markdownReport({
       repositoryPath: "/work/sample",

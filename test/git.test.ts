@@ -10,9 +10,14 @@ import {
   GitExecutableError,
   GitReferenceError,
   GitRepositoryError,
+  parseNameStatusNul,
   resolveBaseRef,
   type GitExecutor,
 } from "../src/git.js";
+import {
+  completeNameStatusOutput,
+  malformedNameStatusOutputs,
+} from "./fixtures/git-name-status.js";
 
 type RepositoryFixture = {
   repositoryPath: string;
@@ -61,6 +66,34 @@ afterEach(async () => {
       rm(directory, { recursive: true, force: true }),
     ),
   );
+});
+
+describe("NUL-delimited Git name-status parsing", () => {
+  it("preserves paths and models all supported committed-diff statuses", () => {
+    expect(parseNameStatusNul(completeNameStatusOutput)).toEqual([
+      { path: "src/中文 file.ts", status: "added" },
+      { path: "deleted file.ts", status: "deleted" },
+      { path: "src/literal\tname.ts", status: "modified" },
+      {
+        path: "renames/new 中文 name.ts",
+        previousPath: "renames/old\tname.ts",
+        status: "renamed",
+      },
+      {
+        path: "copies/destination\tfile.ts",
+        previousPath: "copies/source file.ts",
+        status: "copied",
+      },
+      { path: "links/changed target", status: "type_changed" },
+      { path: "conflicts/unmerged file.ts", status: "unmerged" },
+    ]);
+  });
+
+  it("ignores malformed name-status records", () => {
+    for (const output of malformedNameStatusOutputs) {
+      expect(parseNameStatusNul(output)).toEqual([]);
+    }
+  });
 });
 
 describe("Git base resolution", () => {
@@ -171,7 +204,7 @@ describe("Git base resolution", () => {
         return "base-commit";
       }
       if (args[0] === "diff") {
-        return "A\tfeature.txt\n";
+        return "A\0feature.txt\0";
       }
       throw new Error(`Unexpected Git command: ${args.join(" ")}`);
     };
@@ -182,7 +215,15 @@ describe("Git base resolution", () => {
     expect(calls).toEqual([
       ["rev-parse", "--git-dir"],
       ["rev-parse", "--verify", "--quiet", "--end-of-options", "topic^{commit}"],
-      ["diff", "--name-status", "base-commit...HEAD", "--"],
+      [
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        "base-commit...HEAD",
+        "--",
+      ],
     ]);
     expect(buffers).toEqual([GIT_MAX_BUFFER_BYTES, GIT_MAX_BUFFER_BYTES, GIT_MAX_BUFFER_BYTES]);
   });

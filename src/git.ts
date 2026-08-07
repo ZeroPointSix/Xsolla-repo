@@ -74,13 +74,13 @@ function isMissingReferenceError(error: unknown): boolean {
   );
 }
 
-function runGit(
+function runGitOutput(
   repositoryPath: string,
   args: readonly string[],
   execute: GitExecutor,
 ): string {
   try {
-    return execute(repositoryPath, args, { maxBuffer: GIT_MAX_BUFFER_BYTES }).trim();
+    return execute(repositoryPath, args, { maxBuffer: GIT_MAX_BUFFER_BYTES });
   } catch (error) {
     if (isGitMissing(error)) {
       throw new GitExecutableError(
@@ -89,6 +89,14 @@ function runGit(
     }
     throw error;
   }
+}
+
+function runGit(
+  repositoryPath: string,
+  args: readonly string[],
+  execute: GitExecutor,
+): string {
+  return runGitOutput(repositoryPath, args, execute).trim();
 }
 
 function repositoryPathIsDirectory(repositoryPath: string): boolean {
@@ -211,6 +219,59 @@ export function resolveBaseRef(
   );
 }
 
+/**
+ * Parses Git's NUL-delimited `--name-status -z` output without altering paths.
+ * Malformed records are ignored rather than being joined into invalid file paths.
+ */
+export function parseNameStatusNul(output: string): ChangedFile[] {
+  const fields = output.split("\0").slice(0, -1);
+  const files: ChangedFile[] = [];
+  let index = 0;
+  while (index < fields.length) {
+    const code = fields[index++] ?? "";
+    const statusCode = code[0];
+
+    if (statusCode === "R" || statusCode === "C") {
+      const previousPath = fields[index++];
+      const path = fields[index++];
+      if (!previousPath || !path) {
+        continue;
+      }
+      files.push({
+        path,
+        previousPath,
+        status: statusCode === "R" ? "renamed" : "copied",
+      });
+      continue;
+    }
+
+    const path = fields[index++];
+    if (!path) {
+      continue;
+    }
+
+    switch (statusCode) {
+      case "A":
+        files.push({ path, status: "added" });
+        break;
+      case "D":
+        files.push({ path, status: "deleted" });
+        break;
+      case "M":
+        files.push({ path, status: "modified" });
+        break;
+      case "T":
+        files.push({ path, status: "type_changed" });
+        break;
+      case "U":
+        files.push({ path, status: "unmerged" });
+        break;
+    }
+  }
+
+  return files;
+}
+
 export function changedFiles(
   repositoryPath: string,
   baseRef?: string,
@@ -221,9 +282,17 @@ export function changedFiles(
 
   let output: string;
   try {
-    output = runGit(
+    output = runGitOutput(
       repositoryPath,
-      ["diff", "--name-status", `${base}...HEAD`, "--"],
+      [
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        `${base}...HEAD`,
+        "--",
+      ],
       execute,
     );
   } catch (error) {
@@ -235,12 +304,5 @@ export function changedFiles(
     );
   }
 
-  return output
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [code, ...pathParts] = line.split("\t");
-      const status = code === "A" ? "added" : code === "D" ? "deleted" : "modified";
-      return { path: pathParts.join("\t"), status };
-    });
+  return parseNameStatusNul(output);
 }

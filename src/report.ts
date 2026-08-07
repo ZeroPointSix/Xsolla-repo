@@ -17,10 +17,17 @@ function truncationDiagnostic(
   return `- ${stream} truncated: retained ${truncation.capturedBytes} source bytes and omitted ${truncation.omittedBytes} source bytes.`;
 }
 
+function changedFileLine(file: ChangedFile): string {
+  if (file.status === "renamed" || file.status === "copied") {
+    return `${file.status}: ${file.previousPath} → ${file.path}`;
+  }
+  return `${file.path} (${file.status})`;
+}
+
 export function markdownReport(input: ReportInput): string {
   const lines = [`# Review Report: ${input.repositoryPath}`, "", "## Changed files"];
   for (const file of input.changedFiles) {
-    lines.push(`- ${file.path} (${file.status})`);
+    lines.push(`- ${changedFileLine(file)}`);
   }
   lines.push("", "## Validation output");
   for (const result of input.validationResults) {

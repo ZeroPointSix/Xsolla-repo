@@ -1,7 +1,12 @@
-export type ChangedFile = {
-  path: string;
-  status: "added" | "modified" | "deleted" | "untracked";
-};
+export type ChangedFile =
+  | { path: string; status: "added" }
+  | { path: string; status: "deleted" }
+  | { path: string; status: "modified" }
+  | { path: string; status: "type_changed" }
+  | { path: string; status: "unmerged" }
+  | { path: string; status: "untracked" }
+  | { path: string; previousPath: string; status: "renamed" }
+  | { path: string; previousPath: string; status: "copied" };
 
 export type ValidationOutputTruncation = {
   truncated: boolean;
