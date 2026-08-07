@@ -294,6 +294,50 @@ describe("terminateProcessTree", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("releases a helper whose SIGKILL synchronously emits an error without scheduling a reap timer", async () => {
+    const child = fakeChild();
+    const taskkill = fakeTaskkill();
+    const helperKill = vi.fn(() => {
+      taskkill.emit("error", new Error("synchronous helper failure"));
+      return true;
+    });
+    Object.assign(taskkill, { kill: helperKill });
+    const observationMs = 20;
+    const started = Date.now();
+
+    const terminationPromise = terminateProcessTree(child, "SIGKILL", {
+      platform: "win32",
+      taskkillSpawn: vi.fn(() => taskkill) as never,
+      taskkillObservationMs: observationMs,
+    });
+    const errorListener = taskkill.listeners("error")[0];
+    const closeListener = taskkill.listeners("close")[0];
+    expect(errorListener).toBeTypeOf("function");
+    expect(closeListener).toBeTypeOf("function");
+
+    await expect(terminationPromise).resolves.toMatchObject({
+      succeeded: false,
+      error: expect.stringContaining("synchronous helper failure"),
+    });
+
+    // The terminal error happens inside kill(), so cleanup must already have
+    // released the helper before the termination promise resolves.
+    expect(Date.now() - started).toBeLessThan(150);
+    expect(helperKill).toHaveBeenCalledWith("SIGKILL");
+    expect(taskkill.unref).toHaveBeenCalledOnce();
+    expect(taskkill.listenerCount("close")).toBe(0);
+    expect(taskkill.listeners("close")).not.toContain(closeListener);
+    expect(taskkill.listenerCount("error")).toBe(1);
+    expect(taskkill.listeners("error")).not.toContain(errorListener);
+    expect(taskkill.listeners("error")[0]?.name).toBe("ignoreUnobservableTaskkillError");
+    expect(() => taskkill.emit("error", new Error("late helper failure"))).not.toThrow();
+
+    // If a reap timer were installed after synchronous settlement, it would
+    // invoke unref a second time and extend the host's referenced lifetime.
+    await new Promise((resolve) => setTimeout(resolve, observationMs + 20));
+    expect(taskkill.unref).toHaveBeenCalledOnce();
+  });
+
   it("kills and reaps a hanging taskkill helper after its observation window", async () => {
     const child = fakeChild();
     const taskkill = fakeTaskkill();

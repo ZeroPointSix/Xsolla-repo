@@ -155,6 +155,16 @@ function unrefTimer(callback: () => void, delay: number): NodeJS.Timeout {
  */
 function ignoreUnobservableTaskkillError(): void {}
 
+function releaseTaskkillHelper(helper: Pick<ChildProcess, "unref">): string {
+  try {
+    helper.unref();
+    return "was unref'd";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `could not be unref'd: ${message}`;
+  }
+}
+
 function isContinuationByte(byte: number): boolean {
   return (byte & 0b1100_0000) === 0b1000_0000;
 }
@@ -535,7 +545,17 @@ export function terminateProcessTree(
         return;
       }
       if (reapingHelper) {
-        settle(helperFailure(`taskkill helper emitted an error while being reaped: ${error.message}.`));
+        const helperReleaseDetail = taskkill
+          ? releaseTaskkillHelper(taskkill)
+          : "could not be unref'd: taskkill helper became unavailable";
+        // An error after SIGKILL does not guarantee that no later error event
+        // can arrive, so leave only the non-capturing safety listener behind.
+        settle(
+          helperFailure(
+            `taskkill helper emitted an error while being reaped: ${error.message}; ${helperReleaseDetail}.`,
+          ),
+          true,
+        );
         return;
       }
       settle(
@@ -618,16 +638,17 @@ export function terminateProcessTree(
           const message = error instanceof Error ? error.message : String(error);
           helperKillDetail = `could not signal the taskkill helper with SIGKILL: ${message}`;
         }
+        // kill() can synchronously emit the listeners registered above. In that
+        // terminal path, onTaskkillError has already released the helper and
+        // installed its non-capturing late-error guard; do not create a timer
+        // after its cleanup has run.
+        if (settled) {
+          return;
+        }
         // Give the killed helper one more bounded, referenced interval to close
         // or error so it is reaped whenever that can be observed.
         reapTimer = setTimeout(() => {
-          let helperReleaseDetail = "was unref'd";
-          try {
-            helper.unref();
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            helperReleaseDetail = `could not be unref'd: ${message}`;
-          }
+          const helperReleaseDetail = releaseTaskkillHelper(helper);
           settle(
             helperFailure(
               `${helperKillDetail}; taskkill helper remained unobservable for a further ${observationMs} ms and ${helperReleaseDetail} without confirmation.`,
