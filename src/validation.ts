@@ -105,16 +105,16 @@ export function tokenizeValidationCommand(command: string): string[] {
 export async function runValidation(command: string, cwd: string): Promise<ValidationResult> {
   const [file, ...args] = tokenizeValidationCommand(command);
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const child = spawn(file, args, { cwd, shell: false });
     let stdout = "";
     let stderr = "";
     let settled = false;
 
-    const fail = (error: Error) => {
+    const settle = (result: ValidationResult) => {
       if (!settled) {
         settled = true;
-        reject(error);
+        resolve(result);
       }
     };
 
@@ -124,21 +124,24 @@ export async function runValidation(command: string, cwd: string): Promise<Valid
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
-    child.once("error", fail);
-    child.once("close", (code, signal) => {
-      if (settled) {
-        return;
-      }
-      if (code !== 0) {
-        fail(
-          new Error(
-            `Validation command failed with ${signal ? `signal ${signal}` : `exit code ${code}`}: ${command}`,
-          ),
-        );
-        return;
-      }
-      settled = true;
-      resolve({ command, status: "passed", output: stdout || stderr });
+    child.once("error", (error: Error) => {
+      settle({
+        command,
+        status: "error",
+        exitCode: null,
+        stdout,
+        stderr,
+        error: error.message,
+      });
+    });
+    child.once("close", (code) => {
+      settle({
+        command,
+        status: code === 0 ? "passed" : "failed",
+        exitCode: code,
+        stdout,
+        stderr,
+      });
     });
   });
 }
