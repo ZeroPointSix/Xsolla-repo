@@ -542,6 +542,172 @@ describe("runValidation", () => {
     expect(child.unref).toHaveBeenCalledOnce();
   });
 
+  it("waits for the bounded initial Windows helper cleanup after forced taskkill succeeds", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const initialTaskkill = fakeTaskkill();
+    const forcedTaskkill = fakeTaskkill();
+    const taskkillSpawn = vi
+      .fn()
+      .mockReturnValueOnce(initialTaskkill)
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          forcedTaskkill.emit("close", 0, null);
+          child.emit("close", null, "SIGKILL");
+        });
+        return forcedTaskkill;
+      });
+    const started = Date.now();
+
+    const result = await runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 20,
+      postKillSettleMs: 10,
+    });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+    expect(taskkillSpawn).toHaveBeenCalledTimes(2);
+    expect(taskkillSpawn).toHaveBeenLastCalledWith(
+      "taskkill",
+      ["/PID", "4321", "/T", "/F"],
+      { shell: false, stdio: "ignore", windowsHide: true },
+    );
+    expect(initialTaskkill.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(initialTaskkill.unref).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      status: "timed_out",
+      terminationError: expect.stringContaining("did not report completion within 20 ms"),
+    });
+    expect(
+      result.terminationError?.match(/taskkill for PID 4321 did not report completion within 20 ms/g),
+    ).toHaveLength(1);
+  });
+
+  it("runs forced taskkill when failed initial taskkill is followed by an immediate child close", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const initialTaskkill = fakeTaskkill();
+    const forcedTaskkill = fakeTaskkill();
+    Object.assign(child, {
+      kill: vi.fn((signal: NodeJS.Signals) => {
+        if (signal === "SIGTERM") {
+          queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+        }
+        return true;
+      }),
+    });
+    const taskkillSpawn = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => initialTaskkill.emit("close", 5, null));
+        return initialTaskkill;
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => forcedTaskkill.emit("close", 0, null));
+        return forcedTaskkill;
+      });
+
+    const result = await runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 20,
+      postKillSettleMs: 10,
+    });
+
+    expect(result).toMatchObject({
+      status: "timed_out",
+      terminationError: expect.stringContaining("exit code 5"),
+    });
+    expect(taskkillSpawn).toHaveBeenCalledTimes(2);
+    expect(taskkillSpawn).toHaveBeenNthCalledWith(
+      2,
+      "taskkill",
+      ["/PID", "4321", "/T", "/F"],
+      { shell: false, stdio: "ignore", windowsHide: true },
+    );
+  });
+
+  it("waits when forced Windows taskkill completes before the initial helper", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const initialTaskkill = fakeTaskkill();
+    const forcedTaskkill = fakeTaskkill();
+    const taskkillSpawn = vi
+      .fn()
+      .mockReturnValueOnce(initialTaskkill)
+      .mockReturnValueOnce(forcedTaskkill);
+    let validationSettled = false;
+    const validation = runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 250,
+      postKillSettleMs: 10,
+    });
+    void validation.then(() => {
+      validationSettled = true;
+    });
+
+    await waitFor(() => (taskkillSpawn.mock.calls.length === 2 ? true : undefined));
+    forcedTaskkill.emit("close", 0, null);
+    child.emit("close", null, "SIGKILL");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(validationSettled).toBe(false);
+
+    initialTaskkill.emit("close", 0, null);
+    const result = await validation;
+    expect(result.status).toBe("timed_out");
+    expect(result.terminationError).toBeUndefined();
+  });
+
+  it("detaches fake unclosable-child listeners before releasing bounded captures", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const taskkillSpawn = vi.fn(() => fakeTaskkill());
+    const validation = runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 10,
+      postKillSettleMs: 10,
+    });
+    child.stdout?.emit("data", Buffer.from("captured before cleanup"));
+
+    const result = await validation;
+
+    expect(result).toMatchObject({
+      status: "timed_out",
+      stdout: "captured before cleanup",
+    });
+    expect(child.listenerCount("error")).toBe(0);
+    expect(child.listenerCount("close")).toBe(0);
+    expect(child.stdout?.listenerCount("data")).toBe(0);
+    expect(child.stderr?.listenerCount("data")).toBe(0);
+    expect(child.stdout?.listeners("data")).toEqual([]);
+    expect(child.stderr?.listeners("data")).toEqual([]);
+    expect(child.stdout?.destroy).toHaveBeenCalledOnce();
+    expect(child.stderr?.destroy).toHaveBeenCalledOnce();
+    expect(child.unref).toHaveBeenCalledOnce();
+
+    child.stdout?.emit("data", Buffer.from(" late output"));
+    expect(result.stdout).toBe("captured before cleanup");
+  });
+
   it("continues serial validation after a timeout", async () => {
     const directory = await createTemporaryDirectory();
     const marker = join(directory, "timeout-marker");

@@ -70,6 +70,12 @@ export type ProcessTreeTermination = {
   error?: string;
 };
 
+type TerminationOperation = {
+  /** The bounded request, retained so escalation can wait for both operations. */
+  promise: Promise<ProcessTreeTermination>;
+  outcome?: ProcessTreeTermination;
+};
+
 export class ValidationCommandError extends Error {
   constructor(message: string) {
     super(message);
@@ -536,7 +542,10 @@ export function terminateProcessTree(
         stdio: "ignore",
         windowsHide: true,
       });
-      taskkill.once("error", (error: Error) => {
+      function onTaskkillError(error: Error): void {
+        if (settled) {
+          return;
+        }
         if (reapingHelper) {
           settle(helperFailure(`taskkill helper emitted an error while being reaped: ${error.message}.`));
           return;
@@ -546,8 +555,12 @@ export function terminateProcessTree(
             `taskkill failed to start or execute for PID ${pid}: ${error.message}`,
           ),
         );
-      });
-      taskkill.once("close", (code: number | null, closeSignal: NodeJS.Signals | null) => {
+      }
+
+      function onTaskkillClose(code: number | null, closeSignal: NodeJS.Signals | null): void {
+        if (settled) {
+          return;
+        }
         const detail = closeSignal ? `signal ${closeSignal}` : `exit code ${code ?? "unavailable"}`;
         if (reapingHelper) {
           settle(helperFailure(`taskkill helper closed with ${detail} after forced helper cleanup.`));
@@ -558,7 +571,10 @@ export function terminateProcessTree(
           return;
         }
         settle(failWithDirectChildFallback(`taskkill for PID ${pid} ended with ${detail}`));
-      });
+      }
+
+      taskkill.once("error", onTaskkillError);
+      taskkill.once("close", onTaskkillClose);
       // This timer deliberately remains referenced so the helper outcome is
       // observed before validation cleanup is allowed to continue.
       observationTimer = setTimeout(() => {
@@ -709,11 +725,12 @@ export async function runValidation(
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const capturedOutput = outputResult();
       resolve({
         command,
         status: "error",
         exitCode: null,
-        ...outputResult(),
+        ...capturedOutput,
         error: message,
       });
       return;
@@ -722,9 +739,8 @@ export async function runValidation(
     let settled = false;
     let timedOut = false;
     let childClosed = false;
-    let initialTerminationCompleted = false;
-    let forcedTerminationStarted = false;
-    let forcedTerminationCompleted = false;
+    let initialTermination: TerminationOperation | undefined;
+    let forcedTermination: TerminationOperation | undefined;
     let posixProcessGroupAbsent = false;
     let lastPosixProbeError: string | undefined;
     const terminationErrors: string[] = [];
@@ -737,19 +753,40 @@ export async function runValidation(
     let forceKillTimer: NodeJS.Timeout | undefined;
     let postKillTimer: NodeJS.Timeout | undefined;
 
-    const settle = (result: ValidationResult) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeoutTimer);
-        clearTimeout(forceKillTimer);
-        clearTimeout(postKillTimer);
-        resolve(result);
-      }
+    const detachChildListeners = () => {
+      child.removeListener("error", onChildError);
+      child.removeListener("close", onChildClose);
+      child.stdout?.removeListener("data", onStdoutData);
+      child.stderr?.removeListener("data", onStderrData);
     };
 
-    const recordTermination = (attempt: ProcessTreeTermination) => {
-      if (!attempt.succeeded && attempt.error) {
-        terminationErrors.push(attempt.error);
+    const settle = (
+      result: Omit<
+        ValidationResult,
+        "stdout" | "stderr" | "stdoutTruncation" | "stderrTruncation"
+      >,
+      releaseChild = false,
+    ) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(forceKillTimer);
+      clearTimeout(postKillTimer);
+      // Final output must be captured while the data listeners are still live.
+      const capturedOutput = outputResult();
+      detachChildListeners();
+      if (releaseChild) {
+        // Destruction can synchronously emit stream events, so detach first.
+        releaseUnconfirmedChild(child);
+      }
+      resolve({ ...result, ...capturedOutput });
+    };
+
+    const recordTermination = (operation: TerminationOperation) => {
+      if (!operation.outcome?.succeeded && operation.outcome?.error) {
+        terminationErrors.push(operation.outcome.error);
       }
     };
 
@@ -759,18 +796,19 @@ export async function runValidation(
       }
       if (unconfirmedCleanupReason) {
         terminationErrors.push(unconfirmedCleanupReason);
-        releaseUnconfirmedChild(child);
       }
-      settle({
-        command,
-        status: "timed_out",
-        exitCode: null,
-        ...outputResult(),
-        timeoutMs: limits.timeoutMs,
-        ...(terminationErrors.length > 0
-          ? { terminationError: terminationErrors.join(" ") }
-          : {}),
-      });
+      settle(
+        {
+          command,
+          status: "timed_out",
+          exitCode: null,
+          timeoutMs: limits.timeoutMs,
+          ...(terminationErrors.length > 0
+            ? { terminationError: terminationErrors.join(" ") }
+            : {}),
+        },
+        unconfirmedCleanupReason !== undefined,
+      );
     };
 
     const confirmPosixProcessGroupAbsent = (): boolean => {
@@ -791,22 +829,60 @@ export async function runValidation(
       return false;
     };
 
+    const startWindowsPostKillFallback = () => {
+      if (settled || childClosed || postKillTimer) {
+        return;
+      }
+      postKillTimer = setTimeout(
+        () =>
+          timeoutResult(
+            "Validation process did not close after forced cleanup; process-tree cleanup cannot be confirmed.",
+          ),
+        boundedInternalDelay(dependencies.postKillSettleMs, VALIDATION_POST_KILL_SETTLE_MS),
+      );
+    };
+
     const maybeSettleTimedOut = () => {
-      if (!timedOut || !childClosed) {
+      if (!timedOut) {
         return;
       }
       if (isPosix) {
+        if (!childClosed) {
+          return;
+        }
         // A direct-child close says nothing about detached descendants. Only an
         // ESRCH probe of the negative PGID permits an early timeout result.
         if (!confirmPosixProcessGroupAbsent()) {
           return;
         }
+        if (!forcedTermination && initialTermination?.outcome) {
+          timeoutResult();
+        }
+        if (forcedTermination?.outcome) {
+          timeoutResult();
+        }
+        return;
       }
-      if (!forcedTerminationStarted && initialTerminationCompleted) {
-        timeoutResult();
+
+      // Before grace expires, only a confirmed successful /T plus a child close
+      // proves cleanup. A direct-child fallback after failed /T must leave the
+      // referenced grace timer intact so /F still runs.
+      if (!forcedTermination) {
+        if (childClosed && initialTermination?.outcome?.succeeded) {
+          timeoutResult();
+        }
+        return;
       }
-      if (forcedTerminationStarted && forcedTerminationCompleted) {
+
+      // Once escalation starts, a Windows timeout cannot settle until both
+      // bounded taskkill helpers report a terminal outcome, in either order.
+      if (!initialTermination?.outcome || !forcedTermination.outcome) {
+        return;
+      }
+      if (childClosed) {
         timeoutResult();
+      } else {
+        startWindowsPostKillFallback();
       }
     };
 
@@ -817,6 +893,43 @@ export async function runValidation(
         killProcessGroup: dependencies.killProcessGroup,
         taskkillObservationMs: dependencies.taskkillObservationMs,
       });
+
+    const finishTermination = (
+      operation: TerminationOperation,
+      outcome: ProcessTreeTermination,
+    ) => {
+      if (operation.outcome) {
+        return;
+      }
+      operation.outcome = outcome;
+      recordTermination(operation);
+      maybeSettleTimedOut();
+    };
+
+    const startTermination = (signal: NodeJS.Signals): TerminationOperation => {
+      let promise: Promise<ProcessTreeTermination>;
+      try {
+        promise = requestTermination(signal);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        promise = Promise.resolve({
+          succeeded: false,
+          error: `Termination request ${signal} could not be started: ${message}`,
+        });
+      }
+      const operation: TerminationOperation = { promise };
+      void operation.promise.then(
+        (outcome) => finishTermination(operation, outcome),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          finishTermination(operation, {
+            succeeded: false,
+            error: `Termination request ${signal} failed unexpectedly: ${message}`,
+          });
+        },
+      );
+      return operation;
+    };
 
     const startPosixPostKillConfirmation = () => {
       const followUpMs = boundedInternalDelay(
@@ -829,7 +942,6 @@ export async function runValidation(
           return;
         }
         if (confirmPosixProcessGroupAbsent()) {
-          forcedTerminationCompleted = true;
           maybeSettleTimedOut();
           if (!childClosed && !settled) {
             postKillTimer = setTimeout(
@@ -844,7 +956,6 @@ export async function runValidation(
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
-          forcedTerminationCompleted = true;
           const reason = lastPosixProbeError
             ? `Could not confirm process group ${processGroupPid ?? "unavailable"} is absent after SIGKILL: ${lastPosixProbeError}.`
             : `Process group ${processGroupPid ?? "unavailable"} remained after SIGKILL for ${followUpMs} ms.`;
@@ -856,13 +967,15 @@ export async function runValidation(
       confirmUntilDeadline();
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => {
+    function onStdoutData(chunk: Buffer): void {
       stdout.append(chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
+    }
+
+    function onStderrData(chunk: Buffer): void {
       stderr.append(chunk);
-    });
-    child.once("error", (error: Error) => {
+    }
+
+    function onChildError(error: Error): void {
       if (timedOut) {
         if (!settled) {
           terminationErrors.push(`Validation child emitted an error during cleanup: ${error.message}`);
@@ -873,11 +986,11 @@ export async function runValidation(
         command,
         status: "error",
         exitCode: null,
-        ...outputResult(),
         error: error.message,
       });
-    });
-    child.once("close", (code, signal) => {
+    }
+
+    function onChildClose(code: number | null, signal: NodeJS.Signals | null): void {
       if (timedOut) {
         childClosed = true;
         maybeSettleTimedOut();
@@ -888,18 +1001,18 @@ export async function runValidation(
         command,
         status: code === 0 ? "passed" : "failed",
         exitCode: code,
-        ...outputResult(),
         ...(signal ? { signal } : {}),
       });
-    });
+    }
+
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
+    child.once("error", onChildError);
+    child.once("close", onChildClose);
 
     timeoutTimer = unrefTimer(() => {
       timedOut = true;
-      void requestTermination("SIGTERM").then((attempt) => {
-        initialTerminationCompleted = true;
-        recordTermination(attempt);
-        maybeSettleTimedOut();
-      });
+      initialTermination = startTermination("SIGTERM");
 
       // Keep this timer referenced: after SIGTERM the direct child can close
       // while descendants still occupy its detached POSIX process group.
@@ -907,28 +1020,13 @@ export async function runValidation(
         if (settled || (isPosix && posixProcessGroupAbsent)) {
           return;
         }
-        forcedTerminationStarted = true;
-        void requestTermination("SIGKILL").then((attempt) => {
-          recordTermination(attempt);
-          if (isPosix) {
-            startPosixPostKillConfirmation();
-            return;
-          }
-          forcedTerminationCompleted = true;
-          maybeSettleTimedOut();
-          if (!childClosed && !settled) {
-            postKillTimer = setTimeout(
-              () =>
-                timeoutResult(
-                  "Validation process did not close after forced cleanup; process-tree cleanup cannot be confirmed.",
-                ),
-              boundedInternalDelay(
-                dependencies.postKillSettleMs,
-                VALIDATION_POST_KILL_SETTLE_MS,
-              ),
-            );
-          }
-        });
+        forcedTermination = startTermination("SIGKILL");
+        if (isPosix) {
+          void forcedTermination.promise.then(
+            () => startPosixPostKillConfirmation(),
+            () => startPosixPostKillConfirmation(),
+          );
+        }
       }, limits.terminationGraceMs);
     }, limits.timeoutMs);
   });
