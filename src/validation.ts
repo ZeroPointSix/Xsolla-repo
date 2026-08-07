@@ -149,6 +149,12 @@ function unrefTimer(callback: () => void, delay: number): NodeJS.Timeout {
   return timer;
 }
 
+/**
+ * An unref'd taskkill helper can still emit an error after bounded observation
+ * ends. This handler deliberately captures no child or validation state.
+ */
+function ignoreUnobservableTaskkillError(): void {}
+
 function isContinuationByte(byte: number): boolean {
   return (byte & 0b1100_0000) === 0b1000_0000;
 }
@@ -522,13 +528,57 @@ export function terminateProcessTree(
     let observationTimer: NodeJS.Timeout | undefined;
     let reapTimer: NodeJS.Timeout | undefined;
     let fallback: ProcessTreeTermination | undefined;
-    const settle = (result: ProcessTreeTermination) => {
+    let taskkill: ChildProcess | undefined;
+
+    function onTaskkillError(error: Error): void {
+      if (settled) {
+        return;
+      }
+      if (reapingHelper) {
+        settle(helperFailure(`taskkill helper emitted an error while being reaped: ${error.message}.`));
+        return;
+      }
+      settle(
+        failWithDirectChildFallback(
+          `taskkill failed to start or execute for PID ${pid}: ${error.message}`,
+        ),
+      );
+    }
+
+    function onTaskkillClose(code: number | null, closeSignal: NodeJS.Signals | null): void {
+      if (settled) {
+        return;
+      }
+      const detail = closeSignal ? `signal ${closeSignal}` : `exit code ${code ?? "unavailable"}`;
+      if (reapingHelper) {
+        settle(helperFailure(`taskkill helper closed with ${detail} after forced helper cleanup.`));
+        return;
+      }
+      if (code === 0) {
+        settle({ succeeded: true });
+        return;
+      }
+      settle(failWithDirectChildFallback(`taskkill for PID ${pid} ended with ${detail}`));
+    }
+
+    const cleanupTaskkillObservation = (guardUnobservableHelper = false) => {
+      clearTimeout(observationTimer);
+      clearTimeout(reapTimer);
+      if (!taskkill) {
+        return;
+      }
+      taskkill.removeListener("error", onTaskkillError);
+      taskkill.removeListener("close", onTaskkillClose);
+      if (guardUnobservableHelper) {
+        taskkill.on("error", ignoreUnobservableTaskkillError);
+      }
+    };
+    const settle = (result: ProcessTreeTermination, guardUnobservableHelper = false) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(observationTimer);
-      clearTimeout(reapTimer);
+      cleanupTaskkillObservation(guardUnobservableHelper);
       resolve(result);
     };
     const helperFailure = (detail: string): ProcessTreeTermination => ({
@@ -537,42 +587,11 @@ export function terminateProcessTree(
     });
 
     try {
-      const taskkill = (dependencies.taskkillSpawn ?? spawn)("taskkill", taskkillArgs, {
+      taskkill = (dependencies.taskkillSpawn ?? spawn)("taskkill", taskkillArgs, {
         shell: false,
         stdio: "ignore",
         windowsHide: true,
       });
-      function onTaskkillError(error: Error): void {
-        if (settled) {
-          return;
-        }
-        if (reapingHelper) {
-          settle(helperFailure(`taskkill helper emitted an error while being reaped: ${error.message}.`));
-          return;
-        }
-        settle(
-          failWithDirectChildFallback(
-            `taskkill failed to start or execute for PID ${pid}: ${error.message}`,
-          ),
-        );
-      }
-
-      function onTaskkillClose(code: number | null, closeSignal: NodeJS.Signals | null): void {
-        if (settled) {
-          return;
-        }
-        const detail = closeSignal ? `signal ${closeSignal}` : `exit code ${code ?? "unavailable"}`;
-        if (reapingHelper) {
-          settle(helperFailure(`taskkill helper closed with ${detail} after forced helper cleanup.`));
-          return;
-        }
-        if (code === 0) {
-          settle({ succeeded: true });
-          return;
-        }
-        settle(failWithDirectChildFallback(`taskkill for PID ${pid} ended with ${detail}`));
-      }
-
       taskkill.once("error", onTaskkillError);
       taskkill.once("close", onTaskkillClose);
       // This timer deliberately remains referenced so the helper outcome is
@@ -581,13 +600,18 @@ export function terminateProcessTree(
         if (settled) {
           return;
         }
+        const helper = taskkill;
+        if (!helper) {
+          settle(failWithDirectChildFallback("taskkill helper became unavailable during observation"));
+          return;
+        }
         reapingHelper = true;
         fallback = failWithDirectChildFallback(
           `taskkill for PID ${pid} did not report completion within ${observationMs} ms`,
         );
         let helperKillDetail: string;
         try {
-          helperKillDetail = taskkill.kill("SIGKILL")
+          helperKillDetail = helper.kill("SIGKILL")
             ? "sent SIGKILL to the taskkill helper"
             : "could not signal the taskkill helper with SIGKILL";
         } catch (error) {
@@ -597,17 +621,21 @@ export function terminateProcessTree(
         // Give the killed helper one more bounded, referenced interval to close
         // or error so it is reaped whenever that can be observed.
         reapTimer = setTimeout(() => {
-          taskkill.unref();
+          let helperReleaseDetail = "was unref'd";
+          try {
+            helper.unref();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            helperReleaseDetail = `could not be unref'd: ${message}`;
+          }
           settle(
             helperFailure(
-              `${helperKillDetail}; taskkill helper remained unobservable for a further ${observationMs} ms and was unref'd without confirmation.`,
+              `${helperKillDetail}; taskkill helper remained unobservable for a further ${observationMs} ms and ${helperReleaseDetail} without confirmation.`,
             ),
+            true,
           );
         }, observationMs);
       }, observationMs);
-      if (settled) {
-        clearTimeout(observationTimer);
-      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       settle(failWithDirectChildFallback(`taskkill could not be spawned for PID ${pid}: ${message}`));
@@ -743,7 +771,9 @@ export async function runValidation(
     let forcedTermination: TerminationOperation | undefined;
     let posixProcessGroupAbsent = false;
     let lastPosixProbeError: string | undefined;
-    const terminationErrors: string[] = [];
+    // Failed termination attempts are diagnostic context, not proof that final
+    // cleanup failed. Attach them only if the final cleanup state is unconfirmed.
+    const terminationAttemptDiagnostics: string[] = [];
     const isPosix = platform !== "win32";
     const processGroupPid =
       typeof child.pid === "number" && Number.isSafeInteger(child.pid) && child.pid > 0
@@ -786,7 +816,7 @@ export async function runValidation(
 
     const recordTermination = (operation: TerminationOperation) => {
       if (!operation.outcome?.succeeded && operation.outcome?.error) {
-        terminationErrors.push(operation.outcome.error);
+        terminationAttemptDiagnostics.push(operation.outcome.error);
       }
     };
 
@@ -794,18 +824,16 @@ export async function runValidation(
       if (settled) {
         return;
       }
-      if (unconfirmedCleanupReason) {
-        terminationErrors.push(unconfirmedCleanupReason);
-      }
+      const terminationError = unconfirmedCleanupReason
+        ? [unconfirmedCleanupReason, ...terminationAttemptDiagnostics].join(" ")
+        : undefined;
       settle(
         {
           command,
           status: "timed_out",
           exitCode: null,
           timeoutMs: limits.timeoutMs,
-          ...(terminationErrors.length > 0
-            ? { terminationError: terminationErrors.join(" ") }
-            : {}),
+          ...(terminationError ? { terminationError } : {}),
         },
         unconfirmedCleanupReason !== undefined,
       );
@@ -879,8 +907,12 @@ export async function runValidation(
       if (!initialTermination?.outcome || !forcedTermination.outcome) {
         return;
       }
-      if (childClosed) {
+      if (childClosed && forcedTermination.outcome.succeeded) {
         timeoutResult();
+      } else if (childClosed) {
+        timeoutResult(
+          "Forced taskkill did not confirm process-tree cleanup; process-tree cleanup cannot be confirmed.",
+        );
       } else {
         startWindowsPostKillFallback();
       }
@@ -978,7 +1010,9 @@ export async function runValidation(
     function onChildError(error: Error): void {
       if (timedOut) {
         if (!settled) {
-          terminationErrors.push(`Validation child emitted an error during cleanup: ${error.message}`);
+          terminationAttemptDiagnostics.push(
+            `Validation child emitted an error during cleanup: ${error.message}`,
+          );
         }
         return;
       }

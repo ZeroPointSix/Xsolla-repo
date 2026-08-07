@@ -196,16 +196,33 @@ describe("terminateProcessTree", () => {
       taskkillSpawn: spawnTaskkill as never,
       taskkillObservationMs: 25,
     });
+    const termErrorListener = termTaskkill.listeners("error")[0];
+    const termCloseListener = termTaskkill.listeners("close")[0];
+    expect(termErrorListener).toBeTypeOf("function");
+    expect(termCloseListener).toBeTypeOf("function");
     termTaskkill.emit("close", 0, null);
     const force = terminateProcessTree(child, "SIGKILL", {
       platform: "win32",
       taskkillSpawn: spawnTaskkill as never,
       taskkillObservationMs: 25,
     });
+    const forceErrorListener = forceTaskkill.listeners("error")[0];
+    const forceCloseListener = forceTaskkill.listeners("close")[0];
+    expect(forceErrorListener).toBeTypeOf("function");
+    expect(forceCloseListener).toBeTypeOf("function");
     forceTaskkill.emit("close", 0, null);
 
     await expect(term).resolves.toEqual({ succeeded: true });
     await expect(force).resolves.toEqual({ succeeded: true });
+    for (const [taskkill, errorListener, closeListener] of [
+      [termTaskkill, termErrorListener, termCloseListener],
+      [forceTaskkill, forceErrorListener, forceCloseListener],
+    ] as const) {
+      expect(taskkill.listenerCount("error")).toBe(0);
+      expect(taskkill.listenerCount("close")).toBe(0);
+      expect(taskkill.listeners("error")).not.toContain(errorListener);
+      expect(taskkill.listeners("close")).not.toContain(closeListener);
+    }
     expect(spawnTaskkill).toHaveBeenNthCalledWith(
       1,
       "taskkill",
@@ -231,12 +248,22 @@ describe("terminateProcessTree", () => {
       taskkillSpawn: vi.fn(() => taskkill) as never,
       taskkillObservationMs: 25,
     });
+    const errorListener = taskkill.listeners("error")[0];
+    const closeListener = taskkill.listeners("close")[0];
+    expect(taskkill.listenerCount("error")).toBe(1);
+    expect(taskkill.listenerCount("close")).toBe(1);
+    expect(errorListener).toBeTypeOf("function");
+    expect(closeListener).toBeTypeOf("function");
     taskkill.emit("close", 5, null);
 
     await expect(termination).resolves.toMatchObject({
       succeeded: false,
       error: expect.stringContaining("exit code 5"),
     });
+    expect(taskkill.listenerCount("error")).toBe(0);
+    expect(taskkill.listenerCount("close")).toBe(0);
+    expect(taskkill.listeners("error")).not.toContain(errorListener);
+    expect(taskkill.listeners("close")).not.toContain(closeListener);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
@@ -248,12 +275,22 @@ describe("terminateProcessTree", () => {
       taskkillSpawn: vi.fn(() => taskkill) as never,
       taskkillObservationMs: 25,
     });
+    const errorListener = taskkill.listeners("error")[0];
+    const closeListener = taskkill.listeners("close")[0];
+    expect(taskkill.listenerCount("error")).toBe(1);
+    expect(taskkill.listenerCount("close")).toBe(1);
+    expect(errorListener).toBeTypeOf("function");
+    expect(closeListener).toBeTypeOf("function");
     taskkill.emit("error", new Error("ENOENT"));
 
     await expect(termination).resolves.toMatchObject({
       succeeded: false,
       error: expect.stringContaining("ENOENT"),
     });
+    expect(taskkill.listenerCount("error")).toBe(0);
+    expect(taskkill.listenerCount("close")).toBe(0);
+    expect(taskkill.listeners("error")).not.toContain(errorListener);
+    expect(taskkill.listeners("close")).not.toContain(closeListener);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
@@ -267,11 +304,18 @@ describe("terminateProcessTree", () => {
     Object.assign(taskkill, { kill: helperKill });
     const started = Date.now();
 
-    const termination = await terminateProcessTree(child, "SIGTERM", {
+    const terminationPromise = terminateProcessTree(child, "SIGTERM", {
       platform: "win32",
       taskkillSpawn: vi.fn(() => taskkill) as never,
       taskkillObservationMs: 20,
     });
+    const errorListener = taskkill.listeners("error")[0];
+    const closeListener = taskkill.listeners("close")[0];
+    expect(taskkill.listenerCount("error")).toBe(1);
+    expect(taskkill.listenerCount("close")).toBe(1);
+    expect(errorListener).toBeTypeOf("function");
+    expect(closeListener).toBeTypeOf("function");
+    const termination = await terminationPromise;
 
     expect(Date.now() - started).toBeGreaterThanOrEqual(10);
     expect(Date.now() - started).toBeLessThan(250);
@@ -283,6 +327,10 @@ describe("terminateProcessTree", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     expect(helperKill).toHaveBeenCalledWith("SIGKILL");
     expect(taskkill.unref).not.toHaveBeenCalled();
+    expect(taskkill.listenerCount("error")).toBe(0);
+    expect(taskkill.listenerCount("close")).toBe(0);
+    expect(taskkill.listeners("error")).not.toContain(errorListener);
+    expect(taskkill.listeners("close")).not.toContain(closeListener);
   });
 
   it("bounds an unobservable taskkill helper across both observation windows", async () => {
@@ -291,11 +339,18 @@ describe("terminateProcessTree", () => {
     const taskkillSpawn = vi.fn(() => taskkill);
     const started = Date.now();
 
-    const termination = await terminateProcessTree(child, "SIGKILL", {
+    const terminationPromise = terminateProcessTree(child, "SIGKILL", {
       platform: "win32",
       taskkillSpawn: taskkillSpawn as never,
       taskkillObservationMs: 20,
     });
+    const errorListener = taskkill.listeners("error")[0];
+    const closeListener = taskkill.listeners("close")[0];
+    expect(taskkill.listenerCount("error")).toBe(1);
+    expect(taskkill.listenerCount("close")).toBe(1);
+    expect(errorListener).toBeTypeOf("function");
+    expect(closeListener).toBeTypeOf("function");
+    const termination = await terminationPromise;
 
     const elapsed = Date.now() - started;
     expect(elapsed).toBeGreaterThanOrEqual(25);
@@ -312,6 +367,12 @@ describe("terminateProcessTree", () => {
     );
     expect(taskkill.kill).toHaveBeenCalledWith("SIGKILL");
     expect(taskkill.unref).toHaveBeenCalledOnce();
+    expect(taskkill.listenerCount("error")).toBe(1);
+    expect(taskkill.listenerCount("close")).toBe(0);
+    expect(taskkill.listeners("error")).not.toContain(errorListener);
+    expect(taskkill.listeners("close")).not.toContain(closeListener);
+    expect(taskkill.listeners("error")[0]?.name).toBe("ignoreUnobservableTaskkillError");
+    expect(() => taskkill.emit("error", new Error("late ENOENT"))).not.toThrow();
   });
 
   it("does not interpolate invalid process identifiers into taskkill arguments", async () => {
@@ -579,16 +640,11 @@ describe("runValidation", () => {
     );
     expect(initialTaskkill.kill).toHaveBeenCalledWith("SIGKILL");
     expect(initialTaskkill.unref).toHaveBeenCalledOnce();
-    expect(result).toMatchObject({
-      status: "timed_out",
-      terminationError: expect.stringContaining("did not report completion within 20 ms"),
-    });
-    expect(
-      result.terminationError?.match(/taskkill for PID 4321 did not report completion within 20 ms/g),
-    ).toHaveLength(1);
+    expect(result).toMatchObject({ status: "timed_out" });
+    expect(result.terminationError).toBeUndefined();
   });
 
-  it("runs forced taskkill when failed initial taskkill is followed by an immediate child close", async () => {
+  it("confirms Windows cleanup after initial /T exits 5, the child closes, and /F succeeds", async () => {
     const directory = await createTemporaryDirectory();
     const child = fakeChild();
     const initialTaskkill = fakeTaskkill();
@@ -623,10 +679,8 @@ describe("runValidation", () => {
       postKillSettleMs: 10,
     });
 
-    expect(result).toMatchObject({
-      status: "timed_out",
-      terminationError: expect.stringContaining("exit code 5"),
-    });
+    expect(result).toMatchObject({ status: "timed_out" });
+    expect(result.terminationError).toBeUndefined();
     expect(taskkillSpawn).toHaveBeenCalledTimes(2);
     expect(taskkillSpawn).toHaveBeenNthCalledWith(
       2,
@@ -634,6 +688,77 @@ describe("runValidation", () => {
       ["/PID", "4321", "/T", "/F"],
       { shell: false, stdio: "ignore", windowsHide: true },
     );
+  });
+
+  it("keeps failed Windows attempt diagnostics when forced cleanup remains unconfirmed", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const initialTaskkill = fakeTaskkill();
+    const forcedTaskkill = fakeTaskkill();
+    const taskkillSpawn = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => initialTaskkill.emit("close", 5, null));
+        return initialTaskkill;
+      })
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => forcedTaskkill.emit("close", 0, null));
+        return forcedTaskkill;
+      });
+
+    const result = await runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 20,
+      postKillSettleMs: 10,
+    });
+
+    expect(result).toMatchObject({
+      status: "timed_out",
+      terminationError: expect.stringContaining("did not close after forced cleanup"),
+    });
+    expect(result.terminationError).toContain("exit code 5");
+    expect(result.terminationError?.indexOf("did not close after forced cleanup")).toBeLessThan(
+      result.terminationError?.indexOf("exit code 5") ?? Number.POSITIVE_INFINITY,
+    );
+  });
+
+  it("confirms POSIX cleanup when a failed TERM attempt is followed by an ESRCH probe", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    Object.assign(child, {
+      kill: vi.fn((signal: NodeJS.Signals) => {
+        if (signal === "SIGTERM") {
+          queueMicrotask(() => child.emit("close", null, "SIGTERM"));
+        }
+        return true;
+      }),
+    });
+    const killProcessGroup = vi.fn(() => {
+      throw new Error("EPERM");
+    });
+    const probeProcessGroup = vi.fn(() => {
+      throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
+    });
+
+    const result = await runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 20,
+    }, {
+      platform: "linux",
+      spawn: vi.fn(() => child) as never,
+      killProcessGroup,
+      probeProcessGroup,
+    });
+
+    expect(result).toMatchObject({ status: "timed_out" });
+    expect(result.terminationError).toBeUndefined();
+    expect(killProcessGroup).toHaveBeenCalledWith(-4321, "SIGTERM");
+    expect(probeProcessGroup).toHaveBeenCalledWith(-4321);
   });
 
   it("waits when forced Windows taskkill completes before the initial helper", async () => {
