@@ -101,6 +101,10 @@ export function validateMcpReviewRequest(
   request: ReviewRequest,
   environment: McpEnvironment = process.env,
 ): ReviewRequest {
+  if (request.baseRef?.startsWith("-")) {
+    throw new McpPolicyError('MCP base_ref must not begin with "-".');
+  }
+
   const policy = policyFromEnvironment(environment);
   const repositoryPath = resolveRepositoryPath(request.repositoryPath);
 

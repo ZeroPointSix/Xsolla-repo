@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
@@ -156,6 +156,53 @@ describe("MCP server", () => {
     } finally {
       await client.close();
       await server.close();
+    }
+  });
+
+  it("rejects option-like base refs before review can invoke Git", async () => {
+    const fixture = await createRepository();
+    const commandDirectory = await createDirectory();
+    const gitInvocationMarker = join(commandDirectory, "git-invoked");
+    const outsideMarkerPrefix = join(await createDirectory(), "outside-marker");
+    const outsideMarker = `${outsideMarkerPrefix}...HEAD`;
+    const fakeGit = join(commandDirectory, "git");
+    await writeFile(
+      fakeGit,
+      [
+        "#!/bin/sh",
+        `: > \"${gitInvocationMarker}\"`,
+        'for argument in "$@"; do',
+        '  case "$argument" in',
+        '    --output=*) : > "${argument#--output=}" ;;',
+        "  esac",
+        "done",
+        "",
+      ].join("\n"),
+    );
+    await chmod(fakeGit, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = [commandDirectory, originalPath].filter(Boolean).join(delimiter);
+
+    try {
+      const result = await callReview(
+        createMcpServer({ environment: { [MCP_REPOSITORY_ROOT_ENV]: fixture.root } }),
+        {
+          repo_path: fixture.repositoryPath,
+          base_ref: `--output=${outsideMarkerPrefix}`,
+        },
+      );
+
+      expect("isError" in result && result.isError).toBe(true);
+      expect(errorText(result)).toContain('MCP base_ref must not begin with "-".');
+      expect(existsSync(gitInvocationMarker)).toBe(false);
+      expect(existsSync(outsideMarker)).toBe(false);
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
     }
   });
 
