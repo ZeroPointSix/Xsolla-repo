@@ -81,7 +81,7 @@
 
 ## Commands used to verify the result, with outcomes
 
-最终收口从移除 `node_modules` 与 `dist` 的干净工作树执行。为避免环境默认 npm cache 的所有权问题，先运行 `export npm_config_cache=/tmp/xsolla-repo-npm-cache`；以下是实际执行的、与 `.github/workflows/public-checks.yml` 相同顺序的命令。CI 只运行其中第一处 `npm test`；后两次是本次要求的正常模式稳定性复验。
+最终收口从移除 `node_modules` 与 `dist` 的干净工作树执行。更新后的父分支将 CI 前置条件锁定为 `actions/setup-node` 的 Node `20.19.0`，并设置 `NPM_CONFIG_ENGINE_STRICT=true`；根包精确允许 `^20.19.0 || ^22.13.0 || >=24`。本机最终复验使用 Node `v24.18.0`，满足该范围。为避免环境默认 npm cache 的所有权问题，先运行 `export npm_config_cache=/tmp/xsolla-repo-npm-cache`；以下是实际执行的、与 `.github/workflows/public-checks.yml` 相同顺序的命令。CI 只运行其中第一处 `npm test`；后两次是本次要求的正常模式稳定性复验。
 
 ```sh
 export npm_config_cache=/tmp/xsolla-repo-npm-cache

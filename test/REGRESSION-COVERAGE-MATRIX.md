@@ -12,7 +12,7 @@
 | #6 / #19 | 严格 CLI 参数解析 | `test/args.test.ts`、`test/cli.test.ts`：缺值、未知参数、空格路径和帮助入口。 |
 | #7 / #25 | Git 基准引用不被同名 tag 混淆 | `test/git.test.ts`：upstream、`origin/HEAD`、`main`、`master` 的真实仓库用例。 |
 | #8 / #26 | NUL 状态流无损且失败关闭 | `test/git.test.ts` 与 `test/fixtures/git-name-status.ts`：A/D/M/R/C/T/U、Unicode、制表符、换行与畸形流。 |
-| #10 / #32 | 公共 CI 的已安装 CLI 与编译 MCP 入口 smoke | `.github/workflows/public-checks.yml` 依序执行 `npm ci`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run smoke:installed-cli`、`npm run smoke:compiled-mcp`、`npm test`、`npm audit --omit=dev --package-lock-only`。前者验证 pack tarball 的声明 bin、临时安装后的帮助和 JSON 审查结果；后者以 `StdioClientTransport` 启动 `dist/mcp-server.js`，断言 `review_repository` 的 `structuredContent.changedFiles`。 |
+| #10 / #32 | 公共 CI 的严格 Node 前置条件、已安装 CLI 与编译 MCP 入口 smoke | `.github/workflows/public-checks.yml` 以 Node `20.19.0` 和 `NPM_CONFIG_ENGINE_STRICT=true` 执行；根包允许 `^20.19.0 || ^22.13.0 || >=24`。随后依序执行 `npm ci`、`npm run typecheck`、`npm run lint`、`npm run build`、`npm run smoke:installed-cli`、`npm run smoke:compiled-mcp`、`npm test`、`npm audit --omit=dev --package-lock-only`。前者验证 pack tarball 的声明 bin、临时安装后的帮助和 JSON 审查结果；后者以 `StdioClientTransport` 启动 `dist/mcp-server.js`，断言 `review_repository` 的 `structuredContent.changedFiles`。 |
 | #11 / #29 | Markdown 路径转义、围栏和输出目标 | `test/report.test.ts`、`test/cli.test.ts`。 |
 | #12 / #27 | 合并已提交、暂存、未暂存和未跟踪变更 | `test/git.test.ts`：真实仓库完整视图、复制、重命名和删除后重建。 |
 | #13 / #28 | 格式无关 `ReviewResult`、CLI JSON、MCP 结构化响应 | `test/core.test.ts`、`test/cli.test.ts`、`test/mcp-server.test.ts`。 |
