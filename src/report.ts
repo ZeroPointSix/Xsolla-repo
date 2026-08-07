@@ -17,6 +17,11 @@ export function markdownReport(input: ReportInput): string {
       `### ${result.command}`,
       `- Status: ${result.status}`,
       `- Exit code: ${result.exitCode ?? "unavailable"}`,
+    );
+    if (result.signal) {
+      lines.push(`- Signal: ${result.signal}`);
+    }
+    lines.push(
       "#### stdout",
       "```",
       result.stdout,

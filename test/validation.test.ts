@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { markdownReport } from "../src/report.js";
 import {
   runValidation,
   runValidations,
@@ -73,6 +74,29 @@ describe("runValidation", () => {
       stdout: "standard output",
       stderr: "standard error",
     });
+  });
+
+  it("preserves SIGTERM diagnostics in the result and Markdown report", async () => {
+    const directory = await createTemporaryDirectory();
+    const command = `node -e "process.kill(process.pid, 'SIGTERM')"`;
+
+    const result = await runValidation(command, directory);
+
+    expect(result).toEqual({
+      command,
+      status: "failed",
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      signal: "SIGTERM",
+    });
+    expect(
+      markdownReport({
+        repositoryPath: directory,
+        changedFiles: [],
+        validationResults: [result],
+      }),
+    ).toContain("- Signal: SIGTERM");
   });
 
   it("continues serially after a failed validation", async () => {

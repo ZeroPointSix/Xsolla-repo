@@ -134,13 +134,14 @@ export async function runValidation(command: string, cwd: string): Promise<Valid
         error: error.message,
       });
     });
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       settle({
         command,
         status: code === 0 ? "passed" : "failed",
         exitCode: code,
         stdout,
         stderr,
+        ...(signal ? { signal } : {}),
       });
     });
   });

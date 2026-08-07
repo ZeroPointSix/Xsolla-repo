@@ -9,6 +9,7 @@ export type ValidationResult = {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  signal?: NodeJS.Signals;
   error?: string;
 };
 
