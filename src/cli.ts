@@ -1,37 +1,18 @@
 #!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+import { CliUsageError, parseArgs, usage } from "./args.js";
 import { reviewRepository } from "./core.js";
 
-type Args = {
-  command: string;
-  repositoryPath?: string;
-  baseRef?: string;
-  format?: "markdown" | "json";
-  validations: string[];
-};
-
-function parseArgs(argv: string[]): Args {
-  const args: Args = { command: argv[0] ?? "", validations: [] };
-  for (let index = 1; index < argv.length; index++) {
-    const token = argv[index];
-    if (token === "--repo") {
-      args.repositoryPath = argv[++index]?.split(" ")[0];
-    } else if (token === "--base-ref") {
-      args.baseRef = argv[++index];
-    } else if (token === "--format") {
-      args.format = argv[++index] as Args["format"];
-    } else if (token === "--validate") {
-      args.validations.push(argv[++index]);
-    }
-  }
-  return args;
-}
+const VERSION = "2.0.0";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (args.command !== "review" || !args.repositoryPath) {
-    console.error("Usage: inspector review --repo <path> [--base-ref <ref>] [--validate <command>]");
-    process.exitCode = 1;
+  if (args.kind === "help") {
+    console.log(usage());
+    return;
+  }
+  if (args.kind === "version") {
+    console.log(VERSION);
     return;
   }
 
@@ -45,7 +26,11 @@ async function main() {
   console.log("Review report written to review-report.md");
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
+main().catch((error: unknown) => {
+  if (error instanceof CliUsageError) {
+    console.error(`${error.message}\n\n${usage()}`);
+  } else {
+    console.error("Fatal error:", error);
+  }
   process.exitCode = 1;
 });
