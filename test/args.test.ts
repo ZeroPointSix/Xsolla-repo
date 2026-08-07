@@ -22,6 +22,8 @@ describe("parseArgs", () => {
         "main",
         "--format",
         "markdown",
+        "--output",
+        "reports/review.md",
         "--validate",
         "npm test",
         "--validate",
@@ -32,11 +34,18 @@ describe("parseArgs", () => {
       repositoryPath: "/work/repository",
       baseRef: "main",
       format: "markdown",
+      outputPath: "reports/review.md",
       validations: ["npm test", "npm run typecheck"],
     });
   });
 
-  it.each(["--repo", "--base-ref", "--format", "--validate"])(
+  it("accepts - as the stdout output path", () => {
+    expect(parseArgs(["review", "--repo", "/work/repository", "--output", "-"])).toMatchObject({
+      outputPath: "-",
+    });
+  });
+
+  it.each(["--repo", "--base-ref", "--format", "--output", "--validate"])(
     "rejects a missing value for %s",
     (flag) => {
       expect(() => parseArgs(["review", flag])).toThrow(CliUsageError);

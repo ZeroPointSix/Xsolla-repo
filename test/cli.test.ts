@@ -162,4 +162,151 @@ describe("CLI", () => {
       ],
     });
   });
+
+  it("writes a Markdown report to the requested path", async () => {
+    const repositoryPath = await createRepository();
+    const outputDirectory = await createOutputDirectory();
+    const outputPath = join(outputDirectory, "custom-review.md");
+
+    const result = runCli(
+      [
+        "review",
+        "--repo",
+        repositoryPath,
+        "--base-ref",
+        "main",
+        "--output",
+        outputPath,
+      ],
+      outputDirectory,
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`Review report written to ${outputPath}\n`);
+    expect(result.stderr).toBe("");
+    expect(await readFile(outputPath, "utf8")).toContain("# Review Report\n");
+    expect(existsSync(join(outputDirectory, "review-report.md"))).toBe(false);
+    expect(existsSync(join(outputDirectory, "review-report.json"))).toBe(false);
+  });
+
+  it("writes a JSON report to the requested path", async () => {
+    const repositoryPath = await createRepository();
+    const outputDirectory = await createOutputDirectory();
+    const outputPath = join(outputDirectory, "custom-review.json");
+
+    const result = runCli(
+      [
+        "review",
+        "--repo",
+        repositoryPath,
+        "--base-ref",
+        "main",
+        "--format",
+        "json",
+        "--output",
+        outputPath,
+      ],
+      outputDirectory,
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe(`Review report written to ${outputPath}\n`);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(await readFile(outputPath, "utf8"))).toMatchObject({
+      repositoryPath,
+      changedFiles: [{ path: "feature.txt", status: "added" }],
+    });
+    expect(existsSync(join(outputDirectory, "review-report.md"))).toBe(false);
+    expect(existsSync(join(outputDirectory, "review-report.json"))).toBe(false);
+  });
+
+  it("writes a Markdown report to stdout without creating an artifact", async () => {
+    const repositoryPath = await createRepository();
+    const outputDirectory = await createOutputDirectory();
+
+    const result = runCli(
+      [
+        "review",
+        "--repo",
+        repositoryPath,
+        "--base-ref",
+        "main",
+        "--output",
+        "-",
+      ],
+      outputDirectory,
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("# Review Report\n");
+    expect(result.stdout).not.toContain("Review report written to");
+    expect(result.stderr).toBe("");
+    expect(existsSync(join(outputDirectory, "review-report.md"))).toBe(false);
+    expect(existsSync(join(outputDirectory, "review-report.json"))).toBe(false);
+  });
+
+  it("writes a JSON report to stdout without creating an artifact", async () => {
+    const repositoryPath = await createRepository();
+    const outputDirectory = await createOutputDirectory();
+
+    const result = runCli(
+      [
+        "review",
+        "--repo",
+        repositoryPath,
+        "--base-ref",
+        "main",
+        "--format",
+        "json",
+        "--output",
+        "-",
+      ],
+      outputDirectory,
+    );
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      repositoryPath,
+      changedFiles: [{ path: "feature.txt", status: "added" }],
+    });
+    expect(result.stdout).not.toContain("Review report written to");
+    expect(result.stderr).toBe("");
+    expect(existsSync(join(outputDirectory, "review-report.md"))).toBe(false);
+    expect(existsSync(join(outputDirectory, "review-report.json"))).toBe(false);
+  });
+
+  it("rejects a missing --output value before reviewing the repository", async () => {
+    const repositoryPath = await createRepository();
+
+    const result = runCli(["review", "--repo", repositoryPath, "--output"]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("--output requires a value.");
+    expect(result.stderr).toContain("Usage: inspector review");
+  });
+
+  it("exits nonzero with a clear diagnostic when the report target is a directory", async () => {
+    const repositoryPath = await createRepository();
+    const outputDirectory = await createOutputDirectory();
+
+    const result = runCli(
+      [
+        "review",
+        "--repo",
+        repositoryPath,
+        "--base-ref",
+        "main",
+        "--output",
+        outputDirectory,
+      ],
+      outputDirectory,
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(`Unable to write review report to ${outputDirectory}:`);
+    expect(existsSync(join(outputDirectory, "review-report.md"))).toBe(false);
+    expect(existsSync(join(outputDirectory, "review-report.json"))).toBe(false);
+  });
 });
