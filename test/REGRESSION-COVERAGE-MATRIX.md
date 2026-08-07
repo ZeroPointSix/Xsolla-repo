@@ -12,7 +12,7 @@
 | #6 / #19 | 严格 CLI 参数解析 | `test/args.test.ts`、`test/cli.test.ts`：缺值、未知参数、空格路径和帮助入口。 |
 | #7 / #25 | Git 基准引用不被同名 tag 混淆 | `test/git.test.ts`：upstream、`origin/HEAD`、`main`、`master` 的真实仓库用例。 |
 | #8 / #26 | NUL 状态流无损且失败关闭 | `test/git.test.ts` 与 `test/fixtures/git-name-status.ts`：A/D/M/R/C/T/U、Unicode、制表符、换行与畸形流。 |
-| #10 | CI 编译入口冒烟 | `.github/workflows/public-checks.yml`：build 后运行 CLI/MCP smoke；无独立堆叠 PR。 |
+| #10 / #32 | CI 编译入口与公共检查 | `.github/workflows/public-checks.yml`：PR 触发、typecheck、lint、build、编译 CLI help、全量测试和 production audit；MCP stdio 由最终手动 smoke 覆盖，不在该工作流中运行。 |
 | #11 / #29 | Markdown 路径转义、围栏和输出目标 | `test/report.test.ts`、`test/cli.test.ts`。 |
 | #12 / #27 | 合并已提交、暂存、未暂存和未跟踪变更 | `test/git.test.ts`：真实仓库完整视图、复制、重命名和删除后重建。 |
 | #13 / #28 | 格式无关 `ReviewResult`、CLI JSON、MCP 结构化响应 | `test/core.test.ts`、`test/cli.test.ts`、`test/mcp-server.test.ts`。 |
