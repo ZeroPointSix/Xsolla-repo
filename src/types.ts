@@ -20,6 +20,8 @@ export type ValidationResult = {
   signal?: NodeJS.Signals;
   error?: string;
   timeoutMs?: number;
+  /** Present when timed-out process-tree cleanup could not be confirmed. */
+  terminationError?: string;
 };
 
 export type ReviewRequest = {

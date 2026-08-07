@@ -58,13 +58,18 @@ A CLI command is discoverable through its executable, `--help`-style usage,
 and repository documentation. Each CLI validation has a 60-second timeout and
 captures at most 256 KiB (262,144 bytes) from each of stdout and stderr.
 Experimental MCP uses a 15-second timeout and captures at most 32 KiB (32,768
-bytes) from each stream. Capture is
-streaming and bounded: when a stream exceeds its limit, the report preserves a
-head and tail, inserts a visible `[..., <count> bytes omitted ...]` marker, and reports
-the retained and omitted source-byte counts. Timed-out commands receive the
+bytes) from each stream. A configured per-stream budget must be a safe integer
+from 128 bytes through the practical 16 MiB (16,777,216-byte) maximum. Capture
+is streaming and bounded: when a stream exceeds its limit, the report preserves
+a head and tail, inserts a visible `[..., <count> bytes omitted ...]` marker
+within that same budget, and reports the retained and omitted source-byte
+counts. Retained arbitrary bytes are made valid UTF-8 without expansion, then
+cut only at grapheme-cluster boundaries. Timed-out commands receive the
 `timed_out` status; POSIX process groups receive `SIGTERM`, then `SIGKILL` after
 one second if needed. Windows uses shellless `taskkill /PID <pid> /T`, followed
-by `/F` after the same grace period, to clean up the process tree.
+by `/F` after the same grace period, to clean up the process tree. If Windows
+cleanup cannot be confirmed, the result and report expose a termination
+cleanup diagnostic rather than claiming success.
 
 ### Consistency policy
 

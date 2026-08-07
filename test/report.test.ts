@@ -41,6 +41,7 @@ describe("markdownReport", () => {
           status: "timed_out",
           exitCode: null,
           timeoutMs: 60_000,
+          terminationError: "taskkill exited with code 5; descendant cleanup cannot be confirmed.",
           stdout: "stdout head\n[... 900 bytes omitted ...]\nstdout tail",
           stderr: "",
           stdoutTruncation: {
@@ -55,6 +56,9 @@ describe("markdownReport", () => {
 
     expect(report).toContain("- Status: timed_out");
     expect(report).toContain("- Timeout: exceeded 60000 ms.");
+    expect(report).toContain(
+      "- Termination cleanup: taskkill exited with code 5; descendant cleanup cannot be confirmed.",
+    );
     expect(report).toContain(
       "- stdout truncated: retained 124 source bytes and omitted 900 source bytes.",
     );

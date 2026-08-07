@@ -35,6 +35,9 @@ export function markdownReport(input: ReportInput): string {
     if (result.status === "timed_out" && result.timeoutMs) {
       lines.push(`- Timeout: exceeded ${result.timeoutMs} ms.`);
     }
+    if (result.terminationError) {
+      lines.push(`- Termination cleanup: ${result.terminationError}`);
+    }
     const stdoutDiagnostic = truncationDiagnostic("stdout", result.stdoutTruncation);
     if (stdoutDiagnostic) {
       lines.push(stdoutDiagnostic);

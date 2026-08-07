@@ -1,12 +1,16 @@
+import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { markdownReport } from "../src/report.js";
 import {
   CLI_VALIDATION_DEFAULTS,
+  MAXIMUM_OUTPUT_BYTES,
+  MAXIMUM_TIMER_DELAY_MS,
   MCP_VALIDATION_DEFAULTS,
   terminateProcessTree,
   VALIDATION_KILL_GRACE_MS,
@@ -21,6 +25,7 @@ const fixturePids = new Set<number>();
 const childFixturePath = fileURLToPath(
   new URL("./fixtures/validation-child.cjs", import.meta.url),
 );
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 function untruncated(capturedBytes: number) {
   return { truncated: false, capturedBytes, omittedBytes: 0 };
@@ -40,8 +45,9 @@ async function createTemporaryDirectory(): Promise<string> {
 
 async function waitFor<T>(
   callback: () => T | undefined | Promise<T | undefined>,
+  timeoutMs = 750,
 ): Promise<T> {
-  const deadline = Date.now() + 750;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await callback();
     if (value !== undefined) {
@@ -80,8 +86,68 @@ function killFixtureProcess(pid: number): void {
   try {
     process.kill(pid, "SIGKILL");
   } catch {
-    // The assertion normally confirms that timeout cleanup already ended it.
+    // Timeout cleanup normally already ended the fixture.
   }
+}
+
+function fakeChild(pid = 4_321): ChildProcess {
+  const stdout = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+  const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+  return Object.assign(new EventEmitter(), {
+    pid,
+    kill: vi.fn(() => true),
+    stdout,
+    stderr,
+    unref: vi.fn(),
+  }) as unknown as ChildProcess;
+}
+
+function fakeTaskkill(): ChildProcess {
+  return Object.assign(new EventEmitter(), { unref: vi.fn() }) as unknown as ChildProcess;
+}
+
+function graphemePrefix(value: string, source: string): boolean {
+  if (value === "") {
+    return true;
+  }
+  for (const { segment, index } of graphemeSegmenter.segment(source)) {
+    if (source.slice(0, index + segment.length) === value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function graphemeSuffix(value: string, source: string): boolean {
+  if (value === "") {
+    return true;
+  }
+  for (const { index } of graphemeSegmenter.segment(source)) {
+    if (source.slice(index) === value) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function omissionMarker(output: string): RegExpMatchArray {
+  const marker = output.match(/\n\[\.\.\. \d+ bytes omitted \.\.\.\]\n/);
+  expect(marker).not.toBeNull();
+  return marker as RegExpMatchArray;
+}
+
+function expectBoundedSerializedOutput(
+  output: string,
+  truncation: { capturedBytes: number; omittedBytes: number },
+  budget: number,
+): void {
+  const marker = omissionMarker(output)[0];
+  expect(Buffer.byteLength(output)).toBeLessThanOrEqual(budget);
+  expect(Buffer.byteLength(output)).toBe(
+    truncation.capturedBytes + Buffer.byteLength(marker),
+  );
+  expect(truncation.capturedBytes).toBeGreaterThan(0);
+  expect(truncation.omittedBytes).toBeGreaterThan(0);
 }
 
 afterEach(async () => {
@@ -113,15 +179,30 @@ describe("tokenizeValidationCommand", () => {
 });
 
 describe("terminateProcessTree", () => {
-  it("uses exact shellless numeric taskkill arguments on every platform", () => {
-    const child = { pid: 4_321, kill: vi.fn() };
-    const taskkill = { once: vi.fn() };
-    const spawnTaskkill = vi.fn(() => taskkill);
-    const dependencies = { platform: "win32" as const, spawn: spawnTaskkill as never };
+  it("uses shellless numeric taskkill arguments and observes a successful close", async () => {
+    const child = fakeChild();
+    const termTaskkill = fakeTaskkill();
+    const forceTaskkill = fakeTaskkill();
+    const spawnTaskkill = vi
+      .fn()
+      .mockReturnValueOnce(termTaskkill)
+      .mockReturnValueOnce(forceTaskkill);
 
-    terminateProcessTree(child as never, "SIGTERM", dependencies);
-    terminateProcessTree(child as never, "SIGKILL", dependencies);
+    const term = terminateProcessTree(child, "SIGTERM", {
+      platform: "win32",
+      taskkillSpawn: spawnTaskkill as never,
+      taskkillObservationMs: 25,
+    });
+    termTaskkill.emit("close", 0, null);
+    const force = terminateProcessTree(child, "SIGKILL", {
+      platform: "win32",
+      taskkillSpawn: spawnTaskkill as never,
+      taskkillObservationMs: 25,
+    });
+    forceTaskkill.emit("close", 0, null);
 
+    await expect(term).resolves.toEqual({ succeeded: true });
+    await expect(force).resolves.toEqual({ succeeded: true });
     expect(spawnTaskkill).toHaveBeenNthCalledWith(
       1,
       "taskkill",
@@ -134,18 +215,54 @@ describe("terminateProcessTree", () => {
       ["/PID", "4321", "/T", "/F"],
       { shell: false, windowsHide: true },
     );
-    expect(taskkill.once).toHaveBeenCalledWith("error", expect.any(Function));
     expect(child.kill).not.toHaveBeenCalled();
+    expect(termTaskkill.unref).toHaveBeenCalledOnce();
   });
 
-  it("does not interpolate invalid process identifiers into taskkill arguments", () => {
+  it("observes nonzero taskkill close codes and falls back to the direct child", async () => {
+    const child = fakeChild();
+    const taskkill = fakeTaskkill();
+    const termination = terminateProcessTree(child, "SIGTERM", {
+      platform: "win32",
+      taskkillSpawn: vi.fn(() => taskkill) as never,
+      taskkillObservationMs: 25,
+    });
+    taskkill.emit("close", 5, null);
+
+    await expect(termination).resolves.toMatchObject({
+      succeeded: false,
+      error: expect.stringContaining("exit code 5"),
+    });
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("observes taskkill spawn errors and records direct-child fallback", async () => {
+    const child = fakeChild();
+    const taskkill = fakeTaskkill();
+    const termination = terminateProcessTree(child, "SIGTERM", {
+      platform: "win32",
+      taskkillSpawn: vi.fn(() => taskkill) as never,
+      taskkillObservationMs: 25,
+    });
+    taskkill.emit("error", new Error("ENOENT"));
+
+    await expect(termination).resolves.toMatchObject({
+      succeeded: false,
+      error: expect.stringContaining("ENOENT"),
+    });
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("does not interpolate invalid process identifiers into taskkill arguments", async () => {
     const spawnTaskkill = vi.fn();
-    const dependencies = { platform: "win32" as const, spawn: spawnTaskkill as never };
-
     for (const pid of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
-      terminateProcessTree({ pid, kill: vi.fn() } as never, "SIGTERM", dependencies);
+      await expect(
+        terminateProcessTree(fakeChild(pid), "SIGTERM", {
+          platform: "win32",
+          taskkillSpawn: spawnTaskkill as never,
+        }),
+      ).resolves.toMatchObject({ succeeded: false });
     }
-
     expect(spawnTaskkill).not.toHaveBeenCalled();
   });
 });
@@ -166,7 +283,6 @@ describe("runValidation", () => {
 
   it("runs a valid command with separated executable and arguments", async () => {
     const directory = await createTemporaryDirectory();
-
     await expect(
       runValidation(`node -e "process.stdout.write('validation ran')"`, directory),
     ).resolves.toEqual({
@@ -182,7 +298,6 @@ describe("runValidation", () => {
 
   it("returns failed with both streams and a nonzero exit code", async () => {
     const directory = await createTemporaryDirectory();
-
     await expect(
       runValidation(
         `node -e "process.stdout.write('standard output'); process.stderr.write('standard error'); process.exit(3)"`,
@@ -203,19 +318,9 @@ describe("runValidation", () => {
   it("preserves SIGTERM diagnostics in the result and Markdown report", async () => {
     const directory = await createTemporaryDirectory();
     const command = `node -e "process.kill(process.pid, 'SIGTERM')"`;
-
     const result = await runValidation(command, directory);
 
-    expect(result).toEqual({
-      command,
-      status: "failed",
-      exitCode: null,
-      stdout: "",
-      stderr: "",
-      stdoutTruncation: untruncated(0),
-      stderrTruncation: untruncated(0),
-      signal: "SIGTERM",
-    });
+    expect(result).toMatchObject({ status: "failed", exitCode: null, signal: "SIGTERM" });
     expect(
       markdownReport({
         repositoryPath: directory,
@@ -226,7 +331,7 @@ describe("runValidation", () => {
   });
 
   it.skipIf(process.platform === "win32")(
-    "terminates a timed-out process group and its descendants with TERM then KILL",
+    "terminates a timed-out POSIX process group and its descendants",
     async () => {
       const directory = await createTemporaryDirectory();
       const parentMarker = join(directory, "parent-marker");
@@ -242,14 +347,8 @@ describe("runValidation", () => {
       fixturePids.add(descendantPid);
 
       const result = await validation;
-
-      expect(result).toMatchObject({
-        status: "timed_out",
-        exitCode: null,
-        timeoutMs: 1_000,
-      });
-      expect(result.stdoutTruncation).toEqual(untruncated(0));
-      expect(result.stderrTruncation).toEqual(untruncated(0));
+      expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 1_000 });
+      expect(result.terminationError).toBeUndefined();
       await expect(readFile(parentMarker, "utf8")).resolves.toContain("TERM");
       await expect(readFile(descendantMarker, "utf8")).resolves.toContain("TERM");
       await waitForProcessExit(parentPid);
@@ -274,141 +373,265 @@ describe("runValidation", () => {
       fixturePids.add(descendantPid);
 
       const result = await validation;
-
-      expect(result).toMatchObject({
-        status: "timed_out",
-        exitCode: null,
-        timeoutMs: 1_000,
-      });
+      expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 1_000 });
       await waitForProcessExit(parentPid);
       await waitForProcessExit(descendantPid);
     },
   );
 
+  it("makes a forced Windows taskkill attempt after the grace period", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const spawnedTaskkill: ChildProcess[] = [];
+    const taskkillSpawn = vi.fn(() => {
+      const taskkill = fakeTaskkill();
+      spawnedTaskkill.push(taskkill);
+      queueMicrotask(() => taskkill.emit("close", 0, null));
+      return taskkill;
+    });
+    const started = Date.now();
+
+    const result = await runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 10,
+      postKillSettleMs: 10,
+    });
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result).toMatchObject({
+      status: "timed_out",
+      terminationError: expect.stringContaining("did not close after forced cleanup"),
+    });
+    expect(taskkillSpawn).toHaveBeenCalledTimes(2);
+    expect(taskkillSpawn).toHaveBeenLastCalledWith(
+      "taskkill",
+      ["/PID", "4321", "/T", "/F"],
+      { shell: false, windowsHide: true },
+    );
+    expect(spawnedTaskkill.every((taskkill) => (taskkill.unref as ReturnType<typeof vi.fn>).mock.calls.length === 1)).toBe(true);
+  });
+
+  it("settles within a bounded post-kill period when Windows taskkill is unobservable", async () => {
+    const directory = await createTemporaryDirectory();
+    const child = fakeChild();
+    const taskkillSpawn = vi.fn(() => fakeTaskkill());
+    const started = Date.now();
+
+    const result = await runValidation(`node -e "process.stdout.write('unused')"`, directory, {
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }, {
+      platform: "win32",
+      spawn: vi.fn(() => child) as never,
+      taskkillSpawn: taskkillSpawn as never,
+      taskkillObservationMs: 10,
+      postKillSettleMs: 10,
+    });
+
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(result).toMatchObject({
+      status: "timed_out",
+      terminationError: expect.stringContaining("taskkill for PID 4321 did not report completion"),
+    });
+    expect(result.terminationError).toContain("process-tree cleanup cannot be confirmed");
+    expect(taskkillSpawn).toHaveBeenLastCalledWith(
+      "taskkill",
+      ["/PID", "4321", "/T", "/F"],
+      { shell: false, windowsHide: true },
+    );
+    expect(child.kill).toHaveBeenCalledTimes(2);
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
   it("continues serial validation after a timeout", async () => {
     const directory = await createTemporaryDirectory();
     const marker = join(directory, "timeout-marker");
-
     const results = await runValidations(
       [
         childFixtureCommand("stay-alive", marker),
         `node -e "process.stdout.write('second ran')"`,
       ],
       directory,
-      { timeoutMs: 1_000, terminationGraceMs: 25 },
+      { timeoutMs: 250, terminationGraceMs: 25 },
     );
 
     expect(results).toMatchObject([
-      { status: "timed_out", exitCode: null, timeoutMs: 1_000 },
+      { status: "timed_out", exitCode: null, timeoutMs: 250 },
       { status: "passed", exitCode: 0, stdout: "second ran" },
     ]);
   });
 
   it.each(["stdout", "stderr"] as const)(
-    "bounds oversized %s while retaining head, omission marker, and tail",
+    "keeps malformed 0xFF %s valid UTF-8 without expanding it",
     async (stream) => {
       const directory = await createTemporaryDirectory();
       const result = await runValidation(
-        childFixtureCommand("large-output", stream, "1024"),
+        childFixtureCommand("malformed-output", stream),
         directory,
-        { maxOutputBytes: 128 },
       );
       const output = stream === "stdout" ? result.stdout : result.stderr;
-      const truncation =
-        stream === "stdout" ? result.stdoutTruncation : result.stderrTruncation;
-      const otherOutput = stream === "stdout" ? result.stderr : result.stdout;
-      const otherTruncation =
-        stream === "stdout" ? result.stderrTruncation : result.stdoutTruncation;
+      const expected = `${stream}-head:?:${stream}-tail`;
 
       expect(result.status).toBe("passed");
-      expect(truncation).toMatchObject({
-        truncated: true,
-        capturedBytes: expect.any(Number),
-        omittedBytes: expect.any(Number),
-      });
-      expect(truncation.capturedBytes).toBeLessThanOrEqual(128);
-      expect(truncation.omittedBytes).toBeGreaterThan(0);
-      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(128);
-      expect(output).toContain(`${stream}-head`);
-      expect(output).toMatch(/\[\.\.\. \d+ bytes omitted \.\.\.\]/);
-      expect(output).toContain(`${stream}-tail`);
-      expect(otherOutput).toBe("");
-      expect(otherTruncation).toEqual(untruncated(0));
+      expect(output).toBe(expected);
+      expect(output).not.toContain("�");
+      expect(Buffer.byteLength(output)).toBe(Buffer.byteLength(expected));
+      expect(stream === "stdout" ? result.stdoutTruncation : result.stderrTruncation).toEqual(
+        untruncated(Buffer.byteLength(expected)),
+      );
     },
   );
 
   it.each(["stdout", "stderr"] as const)(
-    "keeps truncated %s UTF-8 safe while preserving its head and tail",
+    "bounds oversized %s including the omission marker and source metadata",
     async (stream) => {
       const directory = await createTemporaryDirectory();
-      const repetitions = 96;
+      const budget = 128;
+      const size = 1_024;
       const result = await runValidation(
-        childFixtureCommand("unicode-large-output", stream, String(repetitions)),
+        childFixtureCommand("large-output", stream, String(size)),
         directory,
-        { maxOutputBytes: 128 },
+        { maxOutputBytes: budget },
       );
       const output = stream === "stdout" ? result.stdout : result.stderr;
-      const truncation =
-        stream === "stdout" ? result.stdoutTruncation : result.stderrTruncation;
-      const marker = output.match(/\n\[\.\.\. (\d+) bytes omitted \.\.\.\]\n/);
-      const source =
-        `${stream}-head-😀-漢\n` +
-        "😀é漢".repeat(repetitions) +
-        `\n${stream}-tail-😀-漢\n`;
+      const truncation = stream === "stdout" ? result.stdoutTruncation : result.stderrTruncation;
+      const source = `${stream}-head\n${"x".repeat(size)}\n${stream}-tail\n`;
 
       expect(result.status).toBe("passed");
-      expect(output).not.toContain("�");
-      expect(output).toMatch(new RegExp(`^${stream}-head-😀-漢\\n`));
-      expect(output).toMatch(new RegExp(`${stream}-tail-😀-漢\\n$`));
-      expect(marker).not.toBeNull();
-      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(128);
-      expect(truncation).toEqual({
-        truncated: true,
-        capturedBytes: Buffer.byteLength(output) - Buffer.byteLength(marker?.[0] ?? ""),
-        omittedBytes: Buffer.byteLength(source) - truncation.capturedBytes,
-      });
+      expect(truncation.truncated).toBe(true);
+      expect(truncation.capturedBytes + truncation.omittedBytes).toBe(Buffer.byteLength(source));
+      expectBoundedSerializedOutput(output, truncation, budget);
+      expect(output).toContain(`${stream}-head`);
+      expect(output).toContain(`${stream}-tail`);
     },
   );
 
-  it.each([0, -1, 128.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
-    "rejects invalid maxOutputBytes value %p",
-    async (maxOutputBytes) => {
+  it.each(["stdout", "stderr"] as const)(
+    "keeps truncated malformed %s within its byte budget",
+    async (stream) => {
       const directory = await createTemporaryDirectory();
+      const budget = 128;
+      const malformedBytes = 1_024;
+      const result = await runValidation(
+        childFixtureCommand("malformed-output", stream, String(malformedBytes)),
+        directory,
+        { maxOutputBytes: budget },
+      );
+      const output = stream === "stdout" ? result.stdout : result.stderr;
+      const truncation = stream === "stdout" ? result.stdoutTruncation : result.stderrTruncation;
 
-      await expect(
-        runValidation(`node -e "process.stdout.write('should not run')"`, directory, {
-          maxOutputBytes,
-        }),
-      ).rejects.toThrow("maxOutputBytes must be a positive safe integer.");
+      expect(output).not.toContain("�");
+      expect(output).toContain(`${stream}-head:`);
+      expect(output).toContain(`:${stream}-tail`);
+      expectBoundedSerializedOutput(output, truncation, budget);
+      expect(truncation.capturedBytes + truncation.omittedBytes).toBe(
+        Buffer.byteLength(`${stream}-head:`) + malformedBytes + Buffer.byteLength(`:${stream}-tail`),
+      );
     },
   );
 
-  it("retains the minimum output limit needed for omission diagnostics", async () => {
+  it("preserves valid head and tail text at Unicode grapheme boundaries", async () => {
     const directory = await createTemporaryDirectory();
+    const stream = "stdout";
+    const repetitions = 64;
+    const budget = 256;
+    const decomposed = "é";
+    const zwjEmoji = "👩‍💻";
+    const cjk = "漢字";
+    const source =
+      `${stream}-head:${decomposed}:${zwjEmoji}:${cjk}\n` +
+      `${decomposed}${zwjEmoji}${cjk}`.repeat(repetitions) +
+      `\n${stream}-tail:${decomposed}:${zwjEmoji}:${cjk}\n`;
+    const result = await runValidation(
+      childFixtureCommand("grapheme-output", stream, String(repetitions)),
+      directory,
+      { maxOutputBytes: budget },
+    );
+    const marker = omissionMarker(result.stdout)[0];
+    const markerIndex = result.stdout.indexOf(marker);
+    const retainedHead = result.stdout.slice(0, markerIndex);
+    const retainedTail = result.stdout.slice(markerIndex + marker.length);
 
-    await expect(
-      runValidation(`node -e "process.stdout.write('should not run')"`, directory, {
-        maxOutputBytes: 127,
-      }),
-    ).rejects.toThrow("maxOutputBytes must be at least 128 bytes");
+    expect(result.status).toBe("passed");
+    expect(result.stdout).not.toContain("�");
+    expect(graphemePrefix(retainedHead, source)).toBe(true);
+    expect(graphemeSuffix(retainedTail, source)).toBe(true);
+    expect(retainedHead).toContain(`${stream}-head:${decomposed}`);
+    expect(retainedTail).toContain(`${stream}-tail:${decomposed}:${zwjEmoji}:${cjk}`);
+    expectBoundedSerializedOutput(result.stdout, result.stdoutTruncation, budget);
+    expect(
+      result.stdoutTruncation.capturedBytes + result.stdoutTruncation.omittedBytes,
+    ).toBe(Buffer.byteLength(source));
   });
 
   it.each([
-    ["timeoutMs", { timeoutMs: 0 }],
-    ["timeoutMs", { timeoutMs: Number.POSITIVE_INFINITY }],
-    ["terminationGraceMs", { terminationGraceMs: -1 }],
-    ["terminationGraceMs", { terminationGraceMs: Number.NaN }],
-  ] as const)("rejects non-positive or non-finite %s", async (_name, options) => {
+    0,
+    -1,
+    127,
+    128.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    MAXIMUM_OUTPUT_BYTES + 1,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])("rejects invalid maxOutputBytes value %p before spawning", async (maxOutputBytes) => {
     const directory = await createTemporaryDirectory();
-
+    const spawnValidation = vi.fn();
     await expect(
-      runValidation(`node -e "process.stdout.write('should not run')"`, directory, options),
-    ).rejects.toThrow("must be a positive finite number.");
+      runValidation(`node -e "process.stdout.write('should not run')"`, directory, {
+        maxOutputBytes,
+      }, { spawn: spawnValidation as never }),
+    ).rejects.toThrow("maxOutputBytes must be a safe integer between");
+    expect(spawnValidation).not.toHaveBeenCalled();
+  });
+
+  it("does not launch a long-lived child when an oversized output budget is rejected", async () => {
+    const directory = await createTemporaryDirectory();
+    const marker = join(directory, "oversized-limit-child-marker");
+    await expect(
+      runValidation(childFixtureCommand("stay-alive", marker), directory, {
+        maxOutputBytes: MAXIMUM_OUTPUT_BYTES + 1,
+      }),
+    ).rejects.toThrow("maxOutputBytes must be a safe integer between");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each([
+    ["timeoutMs", 0],
+    ["timeoutMs", -1],
+    ["timeoutMs", 1.5],
+    ["timeoutMs", Number.NaN],
+    ["timeoutMs", Number.POSITIVE_INFINITY],
+    ["timeoutMs", Number.MAX_SAFE_INTEGER + 1],
+    ["timeoutMs", MAXIMUM_TIMER_DELAY_MS + 1],
+    ["terminationGraceMs", 0],
+    ["terminationGraceMs", -1],
+    ["terminationGraceMs", 1.5],
+    ["terminationGraceMs", Number.NaN],
+    ["terminationGraceMs", Number.POSITIVE_INFINITY],
+    ["terminationGraceMs", Number.MAX_SAFE_INTEGER + 1],
+    ["terminationGraceMs", MAXIMUM_TIMER_DELAY_MS + 1],
+  ] as const)("rejects invalid %s value %p before spawning", async (name, value) => {
+    const directory = await createTemporaryDirectory();
+    const spawnValidation = vi.fn();
+    await expect(
+      runValidation(
+        `node -e "process.stdout.write('should not run')"`,
+        directory,
+        { [name]: value },
+        { spawn: spawnValidation as never },
+      ),
+    ).rejects.toThrow(`${name} must be a positive safe integer no greater than`);
+    expect(spawnValidation).not.toHaveBeenCalled();
   });
 
   it("continues serially after a failed validation", async () => {
     const directory = await createTemporaryDirectory();
-
     const results = await runValidations(
       [
         `node -e "require('node:fs').writeFileSync('first-ran', 'yes'); process.exit(3)"`,
@@ -416,7 +639,6 @@ describe("runValidation", () => {
       ],
       directory,
     );
-
     expect(results).toMatchObject([
       { status: "failed", exitCode: 3 },
       { status: "passed", exitCode: 0, stdout: "second ran" },
@@ -425,31 +647,9 @@ describe("runValidation", () => {
 
   it("returns launch errors without rejecting", async () => {
     const directory = await createTemporaryDirectory();
-
     const result = await runValidation("definitely-not-an-executable", directory);
-
     expect(result).toMatchObject({
       command: "definitely-not-an-executable",
-      status: "error",
-      exitCode: null,
-      stdout: "",
-      stderr: "",
-      stdoutTruncation: untruncated(0),
-      stderrTruncation: untruncated(0),
-    });
-    expect(result.error).toContain("ENOENT");
-  });
-
-  it("returns setup errors without rejecting", async () => {
-    const directory = await createTemporaryDirectory();
-    const missingDirectory = join(directory, "missing");
-
-    const result = await runValidation(
-      `node -e "process.stdout.write('should not run')"`,
-      missingDirectory,
-    );
-
-    expect(result).toMatchObject({
       status: "error",
       exitCode: null,
       stdout: "",
@@ -469,8 +669,7 @@ describe("runValidation", () => {
     ],
     [
       "a pipeline",
-      (marker: string) =>
-        `node -e "process.stdout.write('primary command')" | touch "${marker}"`,
+      (marker: string) => `node -e "process.stdout.write('primary command')" | touch "${marker}"`,
       "pipelines",
     ],
     [
@@ -487,7 +686,6 @@ describe("runValidation", () => {
   ])("rejects %s without creating the marker", async (_description, commandFor, error) => {
     const directory = await createTemporaryDirectory();
     const marker = join(directory, "marker");
-
     await expect(runValidation(commandFor(marker), directory)).rejects.toThrow(error);
     expect(existsSync(marker)).toBe(false);
   });

@@ -32,6 +32,23 @@ function writeUnicodeLargeOutput(stream, name, repetitions) {
   stream.write(`\n${name}-tail-😀-漢\n`);
 }
 
+function writeMalformedOutput(stream, name, repetitions = 1) {
+  stream.write(Buffer.from(`${name}-head:`));
+  stream.write(Buffer.alloc(repetitions, 0xff));
+  stream.write(Buffer.from(`:${name}-tail`));
+}
+
+function writeGraphemeOutput(stream, name, repetitions) {
+  const decomposed = "é";
+  const zwjEmoji = "👩‍💻";
+  const cjk = "漢字";
+  stream.write(`${name}-head:${decomposed}:${zwjEmoji}:${cjk}\n`);
+  for (let index = 0; index < repetitions; index += 1) {
+    stream.write(`${decomposed}${zwjEmoji}${cjk}`);
+  }
+  stream.write(`\n${name}-tail:${decomposed}:${zwjEmoji}:${cjk}\n`);
+}
+
 switch (mode) {
   case "hang-with-descendant": {
     const [parentMarker, descendantMarker] = args;
@@ -52,6 +69,24 @@ switch (mode) {
   case "unicode-large-output": {
     const [stream, repetitions] = args;
     writeUnicodeLargeOutput(
+      stream === "stderr" ? process.stderr : process.stdout,
+      stream,
+      Number(repetitions),
+    );
+    break;
+  }
+  case "malformed-output": {
+    const [stream, repetitions] = args;
+    writeMalformedOutput(
+      stream === "stderr" ? process.stderr : process.stdout,
+      stream,
+      Number(repetitions ?? "1"),
+    );
+    break;
+  }
+  case "grapheme-output": {
+    const [stream, repetitions] = args;
+    writeGraphemeOutput(
       stream === "stderr" ? process.stderr : process.stdout,
       stream,
       Number(repetitions),

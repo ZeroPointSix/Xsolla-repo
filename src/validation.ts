@@ -3,6 +3,14 @@ import type { ChildProcess } from "node:child_process";
 import type { ValidationOutputTruncation, ValidationResult } from "./types.js";
 
 export const VALIDATION_KILL_GRACE_MS = 1_000;
+/** Node clamps larger setTimeout delays to one millisecond. */
+export const MAXIMUM_TIMER_DELAY_MS = 2_147_483_647;
+/** A practical per-stream allocation cap (both stdout and stderr are captured). */
+export const MAXIMUM_OUTPUT_BYTES = 16 * 1024 * 1024;
+export const MINIMUM_OUTPUT_BYTES = 128;
+export const VALIDATION_TASKKILL_OBSERVATION_MS = 250;
+export const VALIDATION_POST_KILL_SETTLE_MS = 250;
+
 export const CLI_VALIDATION_DEFAULTS = Object.freeze({
   timeoutMs: 60_000,
   maxOutputBytes: 256 * 1024,
@@ -22,16 +30,37 @@ export type ValidationLimits = {
 
 export type ValidationOptions = Partial<ValidationLimits>;
 
+export type ValidationDependencies = {
+  /** Test seam; production uses the host platform. */
+  platform?: NodeJS.Platform;
+  /** Test seam for the validation executable. */
+  spawn?: typeof spawn;
+  /** Test seam for Windows taskkill. */
+  taskkillSpawn?: typeof spawn;
+  /** Test seam for POSIX process-group signals. */
+  killProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Bounds how long taskkill may remain unobservable before direct-child fallback. */
+  taskkillObservationMs?: number;
+  /** Bounds how long to await a child close after forced cleanup. */
+  postKillSettleMs?: number;
+};
+
 type CapturedOutput = {
   output: string;
   truncation: ValidationOutputTruncation;
 };
 
-type ProcessTreeTarget = Pick<ChildProcess, "pid" | "kill">;
+type ProcessTreeTarget = Pick<ChildProcess, "pid" | "kill"> &
+  Partial<Pick<ChildProcess, "unref" | "stdout" | "stderr">>;
 
-type ProcessTreeTerminationDependencies = {
-  platform?: NodeJS.Platform;
-  spawn?: typeof spawn;
+export type ProcessTreeTerminationDependencies = Pick<
+  ValidationDependencies,
+  "platform" | "taskkillSpawn" | "killProcessGroup" | "taskkillObservationMs"
+>;
+
+export type ProcessTreeTermination = {
+  succeeded: boolean;
+  error?: string;
 };
 
 export class ValidationCommandError extends Error {
@@ -59,84 +88,216 @@ const unsupportedShellSyntax: Record<string, string> = {
   "~": "home-directory expansion",
 };
 
-const MINIMUM_OUTPUT_BYTES = 128;
-
 function rejectUnsupportedSyntax(character: string): never {
   throw new ValidationCommandError(
     `Validation commands do not support ${unsupportedShellSyntax[character]} (${character}).`,
   );
 }
 
-function requirePositiveFiniteNumber(name: string, value: number): void {
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new ValidationCommandError(`${name} must be a positive finite number.`);
+function requireTimerDelay(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAXIMUM_TIMER_DELAY_MS) {
+    throw new ValidationCommandError(
+      `${name} must be a positive safe integer no greater than ${MAXIMUM_TIMER_DELAY_MS} ms.`,
+    );
   }
 }
 
 function resolveValidationLimits(options: ValidationOptions): ValidationLimits {
   const limits = { ...CLI_VALIDATION_DEFAULTS, ...options };
-  requirePositiveFiniteNumber("timeoutMs", limits.timeoutMs);
-  requirePositiveFiniteNumber("terminationGraceMs", limits.terminationGraceMs);
-  if (!Number.isSafeInteger(limits.maxOutputBytes) || limits.maxOutputBytes <= 0) {
-    throw new ValidationCommandError("maxOutputBytes must be a positive safe integer.");
-  }
-  if (limits.maxOutputBytes < MINIMUM_OUTPUT_BYTES) {
+  requireTimerDelay("timeoutMs", limits.timeoutMs);
+  requireTimerDelay("terminationGraceMs", limits.terminationGraceMs);
+  if (
+    !Number.isSafeInteger(limits.maxOutputBytes) ||
+    limits.maxOutputBytes < MINIMUM_OUTPUT_BYTES ||
+    limits.maxOutputBytes > MAXIMUM_OUTPUT_BYTES
+  ) {
     throw new ValidationCommandError(
-      `maxOutputBytes must be at least ${MINIMUM_OUTPUT_BYTES} bytes to retain output diagnostics.`,
+      `maxOutputBytes must be a safe integer between ${MINIMUM_OUTPUT_BYTES} and ${MAXIMUM_OUTPUT_BYTES} bytes.`,
     );
   }
   return limits;
 }
 
-function isUtf8ContinuationByte(byte: number): boolean {
+function boundedInternalDelay(value: number | undefined, fallback: number): number {
+  if (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0 &&
+    value <= MAXIMUM_TIMER_DELAY_MS
+  ) {
+    return value;
+  }
+  return fallback;
+}
+
+function unrefTimer(callback: () => void, delay: number): NodeJS.Timeout {
+  const timer = setTimeout(callback, delay);
+  timer.unref();
+  return timer;
+}
+
+function isContinuationByte(byte: number): boolean {
   return (byte & 0b1100_0000) === 0b1000_0000;
 }
 
 function utf8SequenceLength(firstByte: number): number {
-  if ((firstByte & 0b1000_0000) === 0) {
-    return 1;
-  }
-  if ((firstByte & 0b1110_0000) === 0b1100_0000) {
+  if (firstByte >= 0xc2 && firstByte <= 0xdf) {
     return 2;
   }
-  if ((firstByte & 0b1111_0000) === 0b1110_0000) {
+  if (firstByte >= 0xe0 && firstByte <= 0xef) {
     return 3;
   }
-  if ((firstByte & 0b1111_1000) === 0b1111_0000) {
+  if (firstByte >= 0xf0 && firstByte <= 0xf4) {
     return 4;
   }
   return 1;
 }
 
+/** Removes a possibly valid UTF-8 sequence split by a raw capture boundary. */
 function trimIncompleteUtf8Suffix(bytes: Buffer): Buffer {
   if (bytes.length === 0) {
     return bytes;
   }
-
   let sequenceStart = bytes.length - 1;
-  while (sequenceStart > 0 && isUtf8ContinuationByte(bytes[sequenceStart])) {
+  while (sequenceStart > 0 && isContinuationByte(bytes[sequenceStart])) {
     sequenceStart -= 1;
   }
-
-  const availableBytes = bytes.length - sequenceStart;
-  if (utf8SequenceLength(bytes[sequenceStart]) > availableBytes) {
-    return bytes.subarray(0, sequenceStart);
-  }
-  return bytes;
+  return utf8SequenceLength(bytes[sequenceStart]) > bytes.length - sequenceStart
+    ? bytes.subarray(0, sequenceStart)
+    : bytes;
 }
 
+/** Removes continuation bytes whose leading byte fell outside a raw tail capture. */
 function trimIncompleteUtf8Prefix(bytes: Buffer): Buffer {
   let start = 0;
-  while (start < bytes.length && isUtf8ContinuationByte(bytes[start])) {
+  while (start < bytes.length && isContinuationByte(bytes[start])) {
     start += 1;
   }
   return bytes.subarray(start);
 }
 
 /**
- * Keeps no more than the configured source-output budget while retaining the
- * first quarter and last three quarters of a stream. The tail-heavy split makes
- * failures' final diagnostics more likely to survive truncation.
+ * Replaces every malformed UTF-8 source byte with one ASCII question mark while
+ * copying valid sequences byte-for-byte. Therefore sanitising never expands the
+ * output, and output byte counts remain identical to retained source byte counts.
+ */
+function sanitizeUtf8(bytes: Buffer): string {
+  const sanitized = Buffer.from(bytes);
+  for (let index = 0; index < sanitized.length; ) {
+    const first = sanitized[index];
+    let sequenceLength = 0;
+
+    if (first <= 0x7f) {
+      sequenceLength = 1;
+    } else if (
+      first >= 0xc2 &&
+      first <= 0xdf &&
+      index + 1 < sanitized.length &&
+      isContinuationByte(sanitized[index + 1])
+    ) {
+      sequenceLength = 2;
+    } else if (
+      first === 0xe0 &&
+      index + 2 < sanitized.length &&
+      sanitized[index + 1] >= 0xa0 &&
+      sanitized[index + 1] <= 0xbf &&
+      isContinuationByte(sanitized[index + 2])
+    ) {
+      sequenceLength = 3;
+    } else if (
+      ((first >= 0xe1 && first <= 0xec) || (first >= 0xee && first <= 0xef)) &&
+      index + 2 < sanitized.length &&
+      isContinuationByte(sanitized[index + 1]) &&
+      isContinuationByte(sanitized[index + 2])
+    ) {
+      sequenceLength = 3;
+    } else if (
+      first === 0xed &&
+      index + 2 < sanitized.length &&
+      sanitized[index + 1] >= 0x80 &&
+      sanitized[index + 1] <= 0x9f &&
+      isContinuationByte(sanitized[index + 2])
+    ) {
+      sequenceLength = 3;
+    } else if (
+      first === 0xf0 &&
+      index + 3 < sanitized.length &&
+      sanitized[index + 1] >= 0x90 &&
+      sanitized[index + 1] <= 0xbf &&
+      isContinuationByte(sanitized[index + 2]) &&
+      isContinuationByte(sanitized[index + 3])
+    ) {
+      sequenceLength = 4;
+    } else if (
+      first >= 0xf1 &&
+      first <= 0xf3 &&
+      index + 3 < sanitized.length &&
+      isContinuationByte(sanitized[index + 1]) &&
+      isContinuationByte(sanitized[index + 2]) &&
+      isContinuationByte(sanitized[index + 3])
+    ) {
+      sequenceLength = 4;
+    } else if (
+      first === 0xf4 &&
+      index + 3 < sanitized.length &&
+      sanitized[index + 1] >= 0x80 &&
+      sanitized[index + 1] <= 0x8f &&
+      isContinuationByte(sanitized[index + 2]) &&
+      isContinuationByte(sanitized[index + 3])
+    ) {
+      sequenceLength = 4;
+    }
+
+    if (sequenceLength === 0) {
+      sanitized[index] = 0x3f;
+      sequenceLength = 1;
+    }
+    index += sequenceLength;
+  }
+  return sanitized.toString("utf8");
+}
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+type RetainedText = {
+  text: string;
+  sourceBytes: number;
+};
+
+function retainHeadGraphemes(text: string, byteBudget: number): RetainedText {
+  let sourceBytes = 0;
+  let end = 0;
+  for (const { segment, index } of graphemeSegmenter.segment(text)) {
+    const segmentBytes = Buffer.byteLength(segment);
+    if (sourceBytes + segmentBytes > byteBudget) {
+      break;
+    }
+    sourceBytes += segmentBytes;
+    end = index + segment.length;
+  }
+  return { text: text.slice(0, end), sourceBytes };
+}
+
+function retainTailGraphemes(text: string, byteBudget: number): RetainedText {
+  const totalBytes = Buffer.byteLength(text);
+  if (totalBytes <= byteBudget) {
+    return { text, sourceBytes: totalBytes };
+  }
+
+  let bytesBefore = 0;
+  for (const { segment, index } of graphemeSegmenter.segment(text)) {
+    if (totalBytes - bytesBefore <= byteBudget) {
+      return { text: text.slice(index), sourceBytes: totalBytes - bytesBefore };
+    }
+    bytesBefore += Buffer.byteLength(segment);
+  }
+  return { text: "", sourceBytes: 0 };
+}
+
+/**
+ * Retains a bounded raw source-byte head and tail. At serialisation time it
+ * sanitises malformed UTF-8 and cuts only on grapheme boundaries, leaving room
+ * for the omission marker within the same configured stream budget.
  */
 class BoundedOutputCapture {
   private readonly head: Buffer;
@@ -174,11 +335,11 @@ class BoundedOutputCapture {
 
   capture(): CapturedOutput {
     if (this.totalBytes <= this.maxOutputBytes) {
+      const output = sanitizeUtf8(
+        Buffer.concat([this.head.subarray(0, this.headLength), this.tailContents()]),
+      );
       return {
-        output: Buffer.concat([
-          this.head.subarray(0, this.headLength),
-          this.tailContents(),
-        ]).toString("utf8"),
+        output,
         truncation: {
           truncated: false,
           capturedBytes: this.totalBytes,
@@ -189,17 +350,16 @@ class BoundedOutputCapture {
 
     let marker = this.omissionMarker(this.totalBytes);
     while (true) {
-      const { head, tail } = this.retainedUtf8Buffers(this.maxOutputBytes - marker.length);
-      const capturedBytes = head.length + tail.length;
-      const omittedBytes = this.totalBytes - capturedBytes;
+      const retained = this.retainedText(this.maxOutputBytes - Buffer.byteLength(marker));
+      const omittedBytes = this.totalBytes - retained.sourceBytes;
       const nextMarker = this.omissionMarker(omittedBytes);
-
-      if (nextMarker.length === marker.length) {
+      if (Buffer.byteLength(nextMarker) === Buffer.byteLength(marker)) {
+        const output = `${retained.head.text}${nextMarker}${retained.tail.text}`;
         return {
-          output: Buffer.concat([head, nextMarker, tail]).toString("utf8"),
+          output,
           truncation: {
             truncated: true,
-            capturedBytes,
+            capturedBytes: retained.sourceBytes,
             omittedBytes,
           },
         };
@@ -208,17 +368,22 @@ class BoundedOutputCapture {
     }
   }
 
-  private retainedUtf8Buffers(sourceBudget: number): { head: Buffer; tail: Buffer } {
+  private retainedText(sourceBudget: number): { head: RetainedText; tail: RetainedText; sourceBytes: number } {
     const headBudget = Math.floor(sourceBudget / 4);
     const tailBudget = sourceBudget - headBudget;
-    const head = trimIncompleteUtf8Suffix(
-      this.head.subarray(0, Math.min(this.headLength, headBudget)),
+    // Segment the full raw captures before applying the smaller serialisation
+    // budgets so a boundary has look-ahead/look-behind for combining marks and
+    // ZWJ sequences. Boundary-split UTF-8 source bytes are omitted, not decoded
+    // as replacement characters.
+    const head = retainHeadGraphemes(
+      sanitizeUtf8(trimIncompleteUtf8Suffix(this.head.subarray(0, this.headLength))),
+      headBudget,
     );
-    const allTail = this.tailContents();
-    const tail = trimIncompleteUtf8Prefix(
-      allTail.subarray(Math.max(0, allTail.length - tailBudget)),
+    const tail = retainTailGraphemes(
+      sanitizeUtf8(trimIncompleteUtf8Prefix(this.tailContents())),
+      tailBudget,
     );
-    return { head, tail };
+    return { head, tail, sourceBytes: head.sourceBytes + tail.sourceBytes };
   }
 
   private appendToTail(chunk: Buffer): void {
@@ -241,8 +406,8 @@ class BoundedOutputCapture {
     this.tailLength = Math.min(this.tailLimit, this.tailLength + chunk.length);
   }
 
-  private omissionMarker(omittedBytes: number): Buffer {
-    return Buffer.from(`\n[... ${omittedBytes} bytes omitted ...]\n`);
+  private omissionMarker(omittedBytes: number): string {
+    return `\n[... ${omittedBytes} bytes omitted ...]\n`;
   }
 
   private tailContents(): Buffer {
@@ -262,49 +427,109 @@ class BoundedOutputCapture {
   }
 }
 
+function terminateDirectChild(child: ProcessTreeTarget, signal: NodeJS.Signals): string {
+  try {
+    return child.kill(signal)
+      ? `sent ${signal} to the direct child`
+      : `could not signal the direct child with ${signal}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `could not signal the direct child with ${signal}: ${message}`;
+  }
+}
+
+/**
+ * Requests termination of the validation process tree and observes the request
+ * rather than treating taskkill spawn as success. A Windows failure falls back
+ * to its direct child but records that descendant cleanup is unconfirmed.
+ */
 export function terminateProcessTree(
   child: ProcessTreeTarget,
   signal: NodeJS.Signals,
   dependencies: ProcessTreeTerminationDependencies = {},
-): void {
+): Promise<ProcessTreeTermination> {
   const pid = child.pid;
   if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) {
-    return;
+    return Promise.resolve({
+      succeeded: false,
+      error: "Validation process has no valid PID; process-tree cleanup cannot be confirmed.",
+    });
   }
 
-  const terminateChild = () => {
-    try {
-      child.kill(signal);
-    } catch {
-      // The process may already have exited between the timeout and this signal.
-    }
-  };
+  const failWithDirectChildFallback = (reason: string): ProcessTreeTermination => ({
+    succeeded: false,
+    error: `${reason}; ${terminateDirectChild(child, signal)}. Descendant cleanup cannot be confirmed.`,
+  });
 
-  if ((dependencies.platform ?? process.platform) === "win32") {
-    const taskkillArgs = [
-      "/PID",
-      String(pid),
-      "/T",
-      ...(signal === "SIGKILL" ? ["/F"] : []),
-    ];
+  if ((dependencies.platform ?? process.platform) !== "win32") {
     try {
-      const taskkill = (dependencies.spawn ?? spawn)("taskkill", taskkillArgs, {
+      (dependencies.killProcessGroup ?? process.kill)(-pid, signal);
+      return Promise.resolve({ succeeded: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return Promise.resolve(
+        failWithDirectChildFallback(`Could not signal process group ${pid} with ${signal}: ${message}`),
+      );
+    }
+  }
+
+  const observationMs = boundedInternalDelay(
+    dependencies.taskkillObservationMs,
+    VALIDATION_TASKKILL_OBSERVATION_MS,
+  );
+  const taskkillArgs = ["/PID", String(pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])];
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let observationTimer: NodeJS.Timeout | undefined;
+    const settle = (result: ProcessTreeTermination) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(observationTimer);
+      resolve(result);
+    };
+
+    try {
+      const taskkill = (dependencies.taskkillSpawn ?? spawn)("taskkill", taskkillArgs, {
         shell: false,
         windowsHide: true,
       });
-      taskkill.once("error", terminateChild);
-    } catch {
-      terminateChild();
+      taskkill.unref();
+      taskkill.once("error", (error: Error) => {
+        settle(
+          failWithDirectChildFallback(
+            `taskkill failed to start or execute for PID ${pid}: ${error.message}`,
+          ),
+        );
+      });
+      taskkill.once("close", (code: number | null, closeSignal: NodeJS.Signals | null) => {
+        if (code === 0) {
+          settle({ succeeded: true });
+          return;
+        }
+        const detail = closeSignal ? `signal ${closeSignal}` : `exit code ${code ?? "unavailable"}`;
+        settle(failWithDirectChildFallback(`taskkill for PID ${pid} ended with ${detail}`));
+      });
+      observationTimer = unrefTimer(() => {
+        settle(
+          failWithDirectChildFallback(
+            `taskkill for PID ${pid} did not report completion within ${observationMs} ms`,
+          ),
+        );
+      }, observationMs);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      settle(failWithDirectChildFallback(`taskkill could not be spawned for PID ${pid}: ${message}`));
     }
-    return;
-  }
+  });
+}
 
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    // The process may already have exited, or groups may be unavailable.
-    terminateChild();
-  }
+function releaseUnconfirmedChild(child: ProcessTreeTarget): void {
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref?.();
 }
 
 /**
@@ -381,25 +606,16 @@ export async function runValidation(
   command: string,
   cwd: string,
   options: ValidationOptions = CLI_VALIDATION_DEFAULTS,
+  dependencies: ValidationDependencies = {},
 ): Promise<ValidationResult> {
   const [file, ...args] = tokenizeValidationCommand(command);
   const limits = resolveValidationLimits(options);
+  // Deliberately allocate both bounded captures before a validation can start.
+  const stdout = new BoundedOutputCapture(limits.maxOutputBytes);
+  const stderr = new BoundedOutputCapture(limits.maxOutputBytes);
+  const platform = dependencies.platform ?? process.platform;
 
   return new Promise((resolve) => {
-    const child = spawn(file, args, {
-      cwd,
-      detached: process.platform !== "win32",
-      shell: false,
-    });
-    const stdout = new BoundedOutputCapture(limits.maxOutputBytes);
-    const stderr = new BoundedOutputCapture(limits.maxOutputBytes);
-    let settled = false;
-    let timedOut = false;
-    let closedAfterTimeout = false;
-    let killSent = false;
-    let timeoutTimer: NodeJS.Timeout | undefined;
-    let forceKillTimer: NodeJS.Timeout | undefined;
-
     const outputResult = () => {
       const capturedStdout = stdout.capture();
       const capturedStderr = stderr.capture();
@@ -411,26 +627,90 @@ export async function runValidation(
       };
     };
 
+    let child: ChildProcess;
+    try {
+      child = (dependencies.spawn ?? spawn)(file, args, {
+        cwd,
+        detached: platform !== "win32",
+        shell: false,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      resolve({
+        command,
+        status: "error",
+        exitCode: null,
+        ...outputResult(),
+        error: message,
+      });
+      return;
+    }
+
+    let settled = false;
+    let timedOut = false;
+    let childClosed = false;
+    let initialTerminationCompleted = false;
+    let forcedTerminationStarted = false;
+    let forcedTerminationCompleted = false;
+    const terminationErrors: string[] = [];
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    let postKillTimer: NodeJS.Timeout | undefined;
+
     const settle = (result: ValidationResult) => {
       if (!settled) {
         settled = true;
         clearTimeout(timeoutTimer);
         clearTimeout(forceKillTimer);
+        clearTimeout(postKillTimer);
         resolve(result);
       }
     };
 
-    const settleTimedOut = () => {
-      if (closedAfterTimeout && killSent) {
-        settle({
-          command,
-          status: "timed_out",
-          exitCode: null,
-          ...outputResult(),
-          timeoutMs: limits.timeoutMs,
-        });
+    const recordTermination = (attempt: ProcessTreeTermination) => {
+      if (!attempt.succeeded && attempt.error) {
+        terminationErrors.push(attempt.error);
       }
     };
+
+    const timeoutResult = (unconfirmedCleanup = false) => {
+      if (unconfirmedCleanup) {
+        terminationErrors.push(
+          "Validation process did not close after forced cleanup; process-tree cleanup cannot be confirmed.",
+        );
+        releaseUnconfirmedChild(child);
+      }
+      settle({
+        command,
+        status: "timed_out",
+        exitCode: null,
+        ...outputResult(),
+        timeoutMs: limits.timeoutMs,
+        ...(terminationErrors.length > 0
+          ? { terminationError: terminationErrors.join(" ") }
+          : {}),
+      });
+    };
+
+    const maybeSettleTimedOut = () => {
+      if (!timedOut || !childClosed) {
+        return;
+      }
+      if (!forcedTerminationStarted && initialTerminationCompleted) {
+        timeoutResult();
+      }
+      if (forcedTerminationStarted && forcedTerminationCompleted) {
+        timeoutResult();
+      }
+    };
+
+    const requestTermination = (signal: NodeJS.Signals) =>
+      terminateProcessTree(child, signal, {
+        platform,
+        taskkillSpawn: dependencies.taskkillSpawn,
+        killProcessGroup: dependencies.killProcessGroup,
+        taskkillObservationMs: dependencies.taskkillObservationMs,
+      });
 
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout.append(chunk);
@@ -439,6 +719,10 @@ export async function runValidation(
       stderr.append(chunk);
     });
     child.once("error", (error: Error) => {
+      if (timedOut) {
+        terminationErrors.push(`Validation child emitted an error during cleanup: ${error.message}`);
+        return;
+      }
       settle({
         command,
         status: "error",
@@ -449,8 +733,8 @@ export async function runValidation(
     });
     child.once("close", (code, signal) => {
       if (timedOut) {
-        closedAfterTimeout = true;
-        settleTimedOut();
+        childClosed = true;
+        maybeSettleTimedOut();
         return;
       }
 
@@ -463,13 +747,33 @@ export async function runValidation(
       });
     });
 
-    timeoutTimer = setTimeout(() => {
+    timeoutTimer = unrefTimer(() => {
       timedOut = true;
-      terminateProcessTree(child, "SIGTERM");
-      forceKillTimer = setTimeout(() => {
-        terminateProcessTree(child, "SIGKILL");
-        killSent = true;
-        settleTimedOut();
+      void requestTermination("SIGTERM").then((attempt) => {
+        initialTerminationCompleted = true;
+        recordTermination(attempt);
+        maybeSettleTimedOut();
+      });
+
+      forceKillTimer = unrefTimer(() => {
+        if (settled || childClosed) {
+          return;
+        }
+        forcedTerminationStarted = true;
+        void requestTermination("SIGKILL").then((attempt) => {
+          forcedTerminationCompleted = true;
+          recordTermination(attempt);
+          maybeSettleTimedOut();
+          if (!childClosed && !settled) {
+            postKillTimer = unrefTimer(
+              () => timeoutResult(true),
+              boundedInternalDelay(
+                dependencies.postKillSettleMs,
+                VALIDATION_POST_KILL_SETTLE_MS,
+              ),
+            );
+          }
+        });
       }, limits.terminationGraceMs);
     }, limits.timeoutMs);
   });
