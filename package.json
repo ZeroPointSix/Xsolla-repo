@@ -13,7 +13,8 @@
     "inspector": "tsx src/cli.ts",
     "mcp-server": "tsx src/mcp-server.ts",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -21,8 +22,10 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "eslint": "^10.8.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.66.0",
     "vitest": "^4.1.10"
   },
   "engines": {
