@@ -2,8 +2,9 @@
 
 This is a small TypeScript developer tool that inspects changes in a Git
 repository, runs optional validation commands, and produces a Markdown report.
-Its production interface is the command line. The bundled stdio MCP server is
-only a local experimental/compatibility adapter, not a production interface.
+Its sole production interface is the command line. The bundled stdio MCP
+source is retained as experimental compatibility code, but it is not a
+production interface and is not available for use.
 
 ## Your task
 
@@ -17,27 +18,27 @@ prioritize, implement, verify, and explain a meaningful scope.
 ## Product decision
 
 **Decision: CLI-first. The CLI is the sole production contract.** The bundled
-stdio MCP server remains available only as a local experimental/compatibility
-adapter; it is not a supported production endpoint and is not a second
-production contract.
+stdio MCP source is retained as experimental compatibility code only. It is
+not a production interface and must not be advertised as safe, available for
+agent experiments, or usable by untrusted callers.
 
 ### Primary user and execution environment
 
 The primary user is a developer reviewing a repository from their own local
 terminal and working directory. The CLI makes the target repository, command,
 and optional validation command visible to that developer at invocation time.
-An AI coding agent may launch the local stdio adapter during an experiment, but
-that does not change the production audience or execution model.
+No agent or untrusted caller is a supported MCP user in the current state.
 
 ### Trust boundary and allowed capabilities
 
 The CLI runs with the invoking developer's local permissions. In particular,
 an optional validation command is executable code selected by that developer;
 the production contract therefore assumes the developer makes that decision in
-their own shell context. A model-mediated MCP call has a different trust
-boundary: prompt-influenced input could select repository paths or validation
-commands. The local adapter must not be treated as authorization to expose
-those capabilities to an agent, a remote caller, or an unattended workflow.
+their own shell context. The retained MCP source does not provide a safe
+alternative trust boundary: its path mapping is not yet corrected by Issue #1,
+and Issues #4 and #5 have not yet provided shellless, allowlisted,
+root-confined, resource-bounded execution. This docs-only PR does not implement
+any of those unfinished safeguards.
 
 ### Reliability, discoverability, latency/context, and output-size tradeoffs
 
@@ -45,30 +46,27 @@ A CLI command is discoverable through its executable, `--help`-style usage,
 and repository documentation. It lets a developer wait for the review in their
 terminal and keep the complete Markdown report on the local filesystem. That
 is a better fit for repository reviews, whose report and command output can be
-large. Passing the report through stdio into an agent consumes context, makes
-output-size limits part of the caller's problem, and adds process/protocol
-failure modes. Keeping MCP experimental avoids promising production
-reliability, latency, discoverability, or output-size behavior that this
-adapter is not designed to provide.
+large. A stdio MCP result would consume agent context, make output-size limits
+the caller's problem, and add process/protocol failure modes. Because the
+source is not available for use, it has no reliability, latency,
+discoverability, or output-size commitment.
 
 ### Consistency policy
 
-Only the CLI has a production behavior guarantee. The MCP adapter must not
-advertise independent production semantics or capabilities. When it is used
-locally, it should remain a thin translation to the review operation rather
-than a second implementation; any future production behavior must be specified
-and documented for the CLI first. There is deliberately no promise of
-production parity, stability, or remote availability for the adapter.
+Only the CLI has a production behavior guarantee. There is no supported MCP
+behavior, availability, or parity claim. Any future MCP interface must first
+implement the unfinished #1, #4, and #5 safeguards and then be specified and
+documented against the CLI.
 
 ### Evidence that would change the decision
 
-This decision would be reconsidered if sustained, representative usage showed
-that agent-driven requests are the dominant production workflow and an
-agent-facing interface could enforce an explicit capability policy for
-repository access and validation commands. It would also require evidence that
-bounded/structured results solve the agent context and output-size problem, and
-that the interface meets measurable reliability and latency targets. Absent
-that evidence, the CLI remains the only production contract.
+This decision would be reconsidered only if sustained, representative usage
+showed that agent-driven requests are the dominant production workflow and an
+agent-facing interface could enforce the required path mapping plus shellless,
+allowlisted, root-confined, resource-bounded execution. It would also require
+evidence that bounded/structured results solve the agent context and
+output-size problem and that the interface meets measurable reliability and
+latency targets. Until then, the CLI remains the only production contract.
 
 ## Time and rules
 
@@ -97,21 +95,17 @@ npm run inspector -- review --repo ./path/to/repo --validate "npm test"
 
 The report is written to `review-report.md`.
 
-## Local experimental MCP adapter
+## Retained experimental MCP source
 
-The stdio server is retained for local experiments and compatibility only. It
-is not a production endpoint, is not supported for remote or unattended use,
-and must not be used to grant an AI agent production access to repository paths
-or validation commands.
+`src/mcp-server.ts` and its package script are retained as compatibility source
+only, not as startup or tool-use instructions. Do not start, register, connect
+to, or invoke this MCP source for agent experiments, automation, or any
+untrusted use.
 
-Start it locally with:
-
-```bash
-npm run mcp-server
-```
-
-It exposes a `review_repository` tool for experimentation. Its availability
-does not add a production contract beyond the CLI.
+It remains unavailable until Issue #1 corrects the repository-path mapping and
+Issues #4 and #5 enforce shellless, allowlisted, root-confined,
+resource-bounded execution. Those changes are unfinished and are explicitly
+outside this docs-only PR.
 
 ## Project layout
 
