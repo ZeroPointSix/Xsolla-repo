@@ -4,6 +4,13 @@ import type { ChangedFile } from "./types.js";
 
 export const GIT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
+type NameStatusRecord =
+  | {
+      arity: 1;
+      status: "added" | "deleted" | "modified" | "type_changed" | "unmerged";
+    }
+  | { arity: 2; status: "renamed" | "copied" };
+
 type GitExecutionOptions = {
   maxBuffer: number;
 };
@@ -30,6 +37,24 @@ export class GitExecutableError extends GitError {}
 export class GitRepositoryError extends GitError {}
 export class GitReferenceError extends GitError {}
 export class GitCommandError extends GitError {}
+
+export type GitNameStatusParseErrorKind =
+  | "empty_field"
+  | "unknown_status"
+  | "unterminated_stream"
+  | "incomplete_record";
+
+/** Signals that a NUL-delimited Git name-status stream is not unambiguous. */
+export class GitNameStatusParseError extends GitError {
+  constructor(
+    readonly kind: GitNameStatusParseErrorKind,
+    readonly fieldIndex: number,
+  ) {
+    super(
+      `Git --name-status -z output is malformed (${kind} at field ${fieldIndex}); no changed files were returned.`,
+    );
+  }
+}
 
 const executeGit: GitExecutor = (repositoryPath, args, { maxBuffer }) =>
   execFileSync("git", args, {
@@ -74,13 +99,13 @@ function isMissingReferenceError(error: unknown): boolean {
   );
 }
 
-function runGit(
+function runGitOutput(
   repositoryPath: string,
   args: readonly string[],
   execute: GitExecutor,
 ): string {
   try {
-    return execute(repositoryPath, args, { maxBuffer: GIT_MAX_BUFFER_BYTES }).trim();
+    return execute(repositoryPath, args, { maxBuffer: GIT_MAX_BUFFER_BYTES });
   } catch (error) {
     if (isGitMissing(error)) {
       throw new GitExecutableError(
@@ -89,6 +114,14 @@ function runGit(
     }
     throw error;
   }
+}
+
+function runGit(
+  repositoryPath: string,
+  args: readonly string[],
+  execute: GitExecutor,
+): string {
+  return runGitOutput(repositoryPath, args, execute).trim();
 }
 
 function repositoryPathIsDirectory(repositoryPath: string): boolean {
@@ -211,6 +244,88 @@ export function resolveBaseRef(
   );
 }
 
+function nameStatusRecord(token: string): NameStatusRecord | undefined {
+  switch (token) {
+    case "A":
+      return { arity: 1, status: "added" };
+    case "D":
+      return { arity: 1, status: "deleted" };
+    case "M":
+      return { arity: 1, status: "modified" };
+    case "T":
+      return { arity: 1, status: "type_changed" };
+    case "U":
+      return { arity: 1, status: "unmerged" };
+  }
+
+  const similarity = token.slice(1);
+  if (!/^\d{1,3}$/.test(similarity) || Number(similarity) > 100) {
+    return undefined;
+  }
+  if (token.startsWith("R")) {
+    return { arity: 2, status: "renamed" };
+  }
+  if (token.startsWith("C")) {
+    return { arity: 2, status: "copied" };
+  }
+  return undefined;
+}
+
+/**
+ * Parses a complete Git `--name-status -z` stream without changing path bytes.
+ *
+ * Fail closed rather than attempting recovery: after a malformed field, the
+ * remaining NUL fields cannot be unambiguously assigned to status records.
+ */
+export function parseNameStatusNul(output: string): ChangedFile[] {
+  if (output === "") {
+    return [];
+  }
+  if (!output.endsWith("\0")) {
+    throw new GitNameStatusParseError("unterminated_stream", output.split("\0").length - 1);
+  }
+
+  const fields = output.slice(0, -1).split("\0");
+  const files: ChangedFile[] = [];
+  let index = 0;
+  while (index < fields.length) {
+    const token = fields[index]!;
+    if (!token) {
+      throw new GitNameStatusParseError("empty_field", index);
+    }
+
+    const record = nameStatusRecord(token);
+    if (!record) {
+      throw new GitNameStatusParseError("unknown_status", index);
+    }
+
+    const pathStart = index + 1;
+    const pathEnd = pathStart + record.arity;
+    if (pathEnd > fields.length) {
+      throw new GitNameStatusParseError("incomplete_record", index);
+    }
+
+    const paths = fields.slice(pathStart, pathEnd);
+    const emptyPathIndex = paths.findIndex((path) => path === "");
+    if (emptyPathIndex !== -1) {
+      throw new GitNameStatusParseError("empty_field", pathStart + emptyPathIndex);
+    }
+
+    if (record.arity === 1) {
+      files.push({ path: paths[0]!, status: record.status });
+    } else {
+      files.push({
+        path: paths[1]!,
+        previousPath: paths[0]!,
+        status: record.status,
+      });
+    }
+    index = pathEnd;
+  }
+
+  return files;
+}
+
 export function changedFiles(
   repositoryPath: string,
   baseRef?: string,
@@ -221,9 +336,18 @@ export function changedFiles(
 
   let output: string;
   try {
-    output = runGit(
+    output = runGitOutput(
       repositoryPath,
-      ["diff", "--name-status", `${base}...HEAD`, "--"],
+      [
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        "--find-copies-harder",
+        `${base}...HEAD`,
+        "--",
+      ],
       execute,
     );
   } catch (error) {
@@ -235,12 +359,5 @@ export function changedFiles(
     );
   }
 
-  return output
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const [code, ...pathParts] = line.split("\t");
-      const status = code === "A" ? "added" : code === "D" ? "deleted" : "modified";
-      return { path: pathParts.join("\t"), status };
-    });
+  return parseNameStatusNul(output);
 }

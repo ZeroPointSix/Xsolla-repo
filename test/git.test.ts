@@ -8,11 +8,18 @@ import {
   GIT_MAX_BUFFER_BYTES,
   GitCommandError,
   GitExecutableError,
+  GitNameStatusParseError,
   GitReferenceError,
   GitRepositoryError,
+  parseNameStatusNul,
   resolveBaseRef,
   type GitExecutor,
 } from "../src/git.js";
+import {
+  completeNameStatusOutput,
+  malformedNameStatusOutputs,
+  malformedStatusPrefixes,
+} from "./fixtures/git-name-status.js";
 
 type RepositoryFixture = {
   repositoryPath: string;
@@ -63,6 +70,61 @@ afterEach(async () => {
   );
 });
 
+describe("NUL-delimited Git name-status parsing", () => {
+  it("preserves Unicode, tab, and newline paths for all supported statuses", () => {
+    expect(parseNameStatusNul(completeNameStatusOutput)).toEqual([
+      { path: "src/中文 file.ts", status: "added" },
+      { path: "deleted file.ts", status: "deleted" },
+      { path: "src/literal\tname.ts", status: "modified" },
+      {
+        path: "renames/new\n中文 name.ts",
+        previousPath: "renames/old\tname.ts",
+        status: "renamed",
+      },
+      {
+        path: "copies/destination\tfile.ts",
+        previousPath: "copies/source\nfile.ts",
+        status: "copied",
+      },
+      { path: "links/changed target", status: "type_changed" },
+      { path: "conflicts/unmerged file.ts", status: "unmerged" },
+    ]);
+  });
+
+  it("returns no changes for a complete empty stream", () => {
+    expect(parseNameStatusNul("")).toEqual([]);
+  });
+
+  it("fails closed with a typed error for malformed records", () => {
+    for (const output of Object.values(malformedNameStatusOutputs)) {
+      expect(() => parseNameStatusNul(output)).toThrow(GitNameStatusParseError);
+    }
+  });
+
+  it("does not treat a status token as a recovered path after misalignment", () => {
+    expect(() => parseNameStatusNul("M\0A\0recovered.ts\0")).toThrow(
+      GitNameStatusParseError,
+    );
+  });
+
+  it("fails closed for fuzzed malformed prefixes instead of recovering later records", () => {
+    let state = 0x5eed1234;
+    const next = () => {
+      state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+      return state;
+    };
+
+    for (let iteration = 0; iteration < 100; iteration += 1) {
+      const status = malformedStatusPrefixes[next() % malformedStatusPrefixes.length]!;
+      const output = [status, `invalid-${iteration}.ts`, "A", `recovered-${iteration}.ts`].join(
+        "\0",
+      ) + "\0";
+
+      expect(() => parseNameStatusNul(output)).toThrow(GitNameStatusParseError);
+    }
+  });
+});
+
 describe("Git base resolution", () => {
   it("uses the current branch upstream instead of a tag named trunk", async () => {
     const fixture = await createRepository("trunk");
@@ -74,6 +136,19 @@ describe("Git base resolution", () => {
     expect(changedFiles(fixture.repositoryPath)).toEqual([
       { path: "feature.txt", status: "added" },
     ]);
+  });
+
+  it("detects copies from unchanged tracked sources", async () => {
+    const fixture = await createRepository("main");
+    await writeFile(join(fixture.repositoryPath, "copied-base.txt"), "base\n");
+    git(fixture.repositoryPath, "add", "copied-base.txt");
+    git(fixture.repositoryPath, "commit", "-m", "Copy unchanged base file");
+
+    expect(changedFiles(fixture.repositoryPath, fixture.baseCommit)).toContainEqual({
+      path: "copied-base.txt",
+      previousPath: "base.txt",
+      status: "copied",
+    });
   });
 
   it("uses refs/remotes/origin/HEAD instead of a tag named origin/HEAD", async () => {
@@ -171,7 +246,7 @@ describe("Git base resolution", () => {
         return "base-commit";
       }
       if (args[0] === "diff") {
-        return "A\tfeature.txt\n";
+        return "A\0feature.txt\0";
       }
       throw new Error(`Unexpected Git command: ${args.join(" ")}`);
     };
@@ -182,7 +257,16 @@ describe("Git base resolution", () => {
     expect(calls).toEqual([
       ["rev-parse", "--git-dir"],
       ["rev-parse", "--verify", "--quiet", "--end-of-options", "topic^{commit}"],
-      ["diff", "--name-status", "base-commit...HEAD", "--"],
+      [
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+        "--find-copies-harder",
+        "base-commit...HEAD",
+        "--",
+      ],
     ]);
     expect(buffers).toEqual([GIT_MAX_BUFFER_BYTES, GIT_MAX_BUFFER_BYTES, GIT_MAX_BUFFER_BYTES]);
   });

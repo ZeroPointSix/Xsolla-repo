@@ -31,6 +31,68 @@ describe("markdownReport", () => {
     expect(report).toContain("standard error");
   });
 
+  it("escapes newline and control characters in the repository-path title", () => {
+    const report = markdownReport({
+      repositoryPath: "/work/\n# injected\t`repository`",
+      changedFiles: [],
+      validationResults: [],
+    });
+
+    expect(report).toContain("# Review Report: /work/\\n\\# injected\\t\\`repository\\`\\u0001");
+    expect(report).not.toContain("\n# injected");
+    expect(report).not.toContain("");
+  });
+
+  it("renders renamed and copied files as separate source and destination paths", () => {
+    const report = markdownReport({
+      repositoryPath: "/work/sample",
+      changedFiles: [
+        { path: "new", previousPath: "old", status: "renamed" },
+        { path: "copy new", previousPath: "copy old", status: "copied" },
+      ],
+      validationResults: [],
+    });
+
+    expect(report).toContain("- renamed: old → new");
+    expect(report).toContain("- copied: copy old → copy new");
+    expect(report).not.toContain("old\tnew");
+  });
+
+  it("escapes control and Markdown characters in every changed-file path", () => {
+    const report = markdownReport({
+      repositoryPath: "/work/sample",
+      changedFiles: [
+        { path: "normal\n- forged\t`file`[name]", status: "modified" },
+        {
+          path: "renamed\n- destination",
+          previousPath: "old\t`source`[name]",
+          status: "renamed",
+        },
+        {
+          path: "copied\t`destination`[name]",
+          previousPath: "copy\n- forged source",
+          status: "copied",
+        },
+        { path: "\\`*_{}[]<>()#+!&|~", status: "added" },
+      ],
+      validationResults: [],
+    });
+
+    expect(report).toContain("- normal\\n- forged\\t\\`file\\`\\[name\\] (modified)");
+    expect(report).toContain(
+      "- renamed: old\\t\\`source\\`\\[name\\] → renamed\\n- destination",
+    );
+    expect(report).toContain(
+      "- copied: copy\\n- forged source → copied\\t\\`destination\\`\\[name\\]",
+    );
+    expect(report).not.toContain("\n- forged");
+    expect(report).not.toContain("\n- destination");
+    expect(report).not.toContain("\n- forged source");
+    for (const character of "\\`*_{}[]<>()#+!&|~") {
+      expect(report).toContain(`\\${character}`);
+    }
+  });
+
   it("reports timeout and stream-truncation diagnostics", () => {
     const report = markdownReport({
       repositoryPath: "/work/sample",
