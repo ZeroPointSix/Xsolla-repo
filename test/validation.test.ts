@@ -3,8 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { markdownReport } from "../src/report.js";
 import {
   runValidation,
+  runValidations,
   tokenizeValidationCommand,
   ValidationCommandError,
 } from "../src/validation.js";
@@ -50,8 +52,101 @@ describe("runValidation", () => {
     ).resolves.toEqual({
       command: `node -e "process.stdout.write('validation ran')"`,
       status: "passed",
-      output: "validation ran",
+      exitCode: 0,
+      stdout: "validation ran",
+      stderr: "",
     });
+  });
+
+  it("returns failed with both streams and a nonzero exit code", async () => {
+    const directory = await createTemporaryDirectory();
+
+    await expect(
+      runValidation(
+        `node -e "process.stdout.write('standard output'); process.stderr.write('standard error'); process.exit(3)"`,
+        directory,
+      ),
+    ).resolves.toEqual({
+      command:
+        `node -e "process.stdout.write('standard output'); process.stderr.write('standard error'); process.exit(3)"`,
+      status: "failed",
+      exitCode: 3,
+      stdout: "standard output",
+      stderr: "standard error",
+    });
+  });
+
+  it("preserves SIGTERM diagnostics in the result and Markdown report", async () => {
+    const directory = await createTemporaryDirectory();
+    const command = `node -e "process.kill(process.pid, 'SIGTERM')"`;
+
+    const result = await runValidation(command, directory);
+
+    expect(result).toEqual({
+      command,
+      status: "failed",
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      signal: "SIGTERM",
+    });
+    expect(
+      markdownReport({
+        repositoryPath: directory,
+        changedFiles: [],
+        validationResults: [result],
+      }),
+    ).toContain("- Signal: SIGTERM");
+  });
+
+  it("continues serially after a failed validation", async () => {
+    const directory = await createTemporaryDirectory();
+
+    const results = await runValidations(
+      [
+        `node -e "require('node:fs').writeFileSync('first-ran', 'yes'); process.exit(3)"`,
+        `node -e "if (!require('node:fs').existsSync('first-ran')) process.exit(2); process.stdout.write('second ran')"`,
+      ],
+      directory,
+    );
+
+    expect(results).toMatchObject([
+      { status: "failed", exitCode: 3 },
+      { status: "passed", exitCode: 0, stdout: "second ran" },
+    ]);
+  });
+
+  it("returns launch errors without rejecting", async () => {
+    const directory = await createTemporaryDirectory();
+
+    const result = await runValidation("definitely-not-an-executable", directory);
+
+    expect(result).toMatchObject({
+      command: "definitely-not-an-executable",
+      status: "error",
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+    });
+    expect(result.error).toContain("ENOENT");
+  });
+
+  it("returns setup errors without rejecting", async () => {
+    const directory = await createTemporaryDirectory();
+    const missingDirectory = join(directory, "missing");
+
+    const result = await runValidation(
+      `node -e "process.stdout.write('should not run')"`,
+      missingDirectory,
+    );
+
+    expect(result).toMatchObject({
+      status: "error",
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+    });
+    expect(result.error).toContain("ENOENT");
   });
 
   it.each([

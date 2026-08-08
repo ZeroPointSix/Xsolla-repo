@@ -5,8 +5,12 @@ export type ChangedFile = {
 
 export type ValidationResult = {
   command: string;
-  status: "passed" | "failed";
-  output: string;
+  status: "passed" | "failed" | "error";
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  signal?: NodeJS.Signals;
+  error?: string;
 };
 
 export type ReviewRequest = {
