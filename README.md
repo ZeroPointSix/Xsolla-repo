@@ -113,7 +113,8 @@ npm test
 
 ```bash
 npm run inspector -- review --repo ./path/to/repo --format markdown
-npm run inspector -- review --repo ./path/to/repo --format json
+npm run inspector -- review --repo ./path/to/repo --format json --output ./reports/review.json
+npm run inspector -- review --repo ./path/to/repo --output - > review-report.md
 npm run inspector -- review --repo ./path/to/repo --validate "npm test"
 ```
 
@@ -159,8 +160,11 @@ by current path for deterministic reports.
 By default, the CLI writes a Markdown report to `review-report.md`. Passing
 `--format json` instead writes a parseable JSON serialization of the same typed
 review result to `review-report.json`; it does not also create a Markdown file.
-Both files are written to the invoking directory, while stdout only names the
-written report.
+Use `--output <path>` to select either format's destination. `--output -` writes
+only the rendered Markdown or JSON to stdout, with no success message or report
+artifact; diagnostics and write failures are written to stderr. Other report
+paths are resolved from the invoking directory, and stdout names the written
+report after a successful write.
 
 ## Retained experimental MCP source
 

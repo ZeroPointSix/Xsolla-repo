@@ -3,6 +3,7 @@ export type ReviewArgs = {
   repositoryPath: string;
   baseRef?: string;
   format?: "markdown" | "json";
+  outputPath?: string;
   validations: string[];
 };
 
@@ -56,6 +57,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       }
       args.format = format;
       index++;
+    } else if (token === "--output") {
+      args.outputPath = requiredValue(argv, index, token);
+      index++;
     } else if (token === "--validate") {
       args.validations.push(requiredValue(argv, index, token));
       index++;
@@ -72,7 +76,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 
 export function usage(): string {
   return [
-    "Usage: inspector review --repo <path> [--base-ref <ref>] [--format <markdown|json>] [--validate <command>]...",
+    "Usage: inspector review --repo <path> [--base-ref <ref>] [--format <markdown|json>] [--output <path|->] [--validate <command>]...",
     "       inspector --help",
     "       inspector --version",
   ].join("\n");
