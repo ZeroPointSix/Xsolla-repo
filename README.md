@@ -2,7 +2,9 @@
 
 This is a small TypeScript developer tool that inspects changes in a Git
 repository, runs optional validation commands, and produces a Markdown report.
-It can be used from a command line or exposed to AI clients through MCP.
+Its sole production interface is the command line. The bundled stdio MCP
+source is retained as experimental compatibility code, but it is not a
+production interface and is not available for use.
 
 ## Your task
 
@@ -15,17 +17,58 @@ prioritize, implement, verify, and explain a meaningful scope.
 
 ## Product decision
 
-This tool may be used directly by developers and by AI coding agents. Decide
-whether its production interface should be **CLI-first**, **MCP-first**, or
-**hybrid**. Implement improvements consistent with your decision.
+**Decision: CLI-first. The CLI is the sole production contract.** The bundled
+stdio MCP source is retained as experimental compatibility code only. It is
+not a production interface and must not be advertised as safe, available for
+agent experiments, or usable by untrusted callers.
 
-There is no preferred label. Explain:
+### Primary user and execution environment
 
-- The primary user and execution environment you assumed.
-- The trust boundary and allowed capabilities.
-- Reliability, discoverability, latency/context, and output-size tradeoffs.
-- How the interfaces you continue to advertise stay behaviorally consistent.
-- What evidence would change your decision.
+The primary user is a developer reviewing a repository from their own local
+terminal and working directory. The CLI makes the target repository, command,
+and optional validation command visible to that developer at invocation time.
+No agent or untrusted caller is a supported MCP user in the current state.
+
+### Trust boundary and allowed capabilities
+
+The CLI runs with the invoking developer's local permissions. In particular,
+an optional validation command is executable code selected by that developer;
+the production contract therefore assumes the developer makes that decision in
+their own shell context. The retained MCP source does not provide a safe
+alternative trust boundary: Issue #1 has not implemented typed repository-path
+mapping, Issue #4 has not implemented a shellless, allowlisted validation
+policy, and Issue #5 has not implemented timeout and output bounds. This
+docs-only PR does not implement any of those unfinished safeguards.
+
+### Reliability, discoverability, latency/context, and output-size tradeoffs
+
+A CLI command is discoverable through its executable, `--help`-style usage,
+and repository documentation. It lets a developer wait for the review in their
+terminal and keep the complete Markdown report on the local filesystem. That
+is a better fit for repository reviews, whose report and command output can be
+large. A stdio MCP result would consume agent context, make output-size limits
+the caller's problem, and add process/protocol failure modes. Because the
+source is not available for use, it has no reliability, latency,
+discoverability, or output-size commitment.
+
+### Consistency policy
+
+Only the CLI has a production behavior guarantee. There is no supported MCP
+behavior, availability, or parity claim. Any future MCP interface must first
+implement Issue #1's typed repository-path mapping, Issue #4's shellless,
+allowlisted validation policy, and Issue #5's timeout and output bounds, then
+be specified and documented against the CLI.
+
+### Evidence that would change the decision
+
+This decision would be reconsidered only if sustained, representative usage
+showed that agent-driven requests are the dominant production workflow and an
+agent-facing interface could enforce typed repository-path mapping, a
+shellless, allowlisted validation policy, and timeout and output bounds. It
+would also require evidence that bounded/structured results solve the agent
+context and output-size problem and that the interface meets measurable
+reliability and latency targets. Until then, the CLI remains the only production
+contract.
 
 ## Time and rules
 
@@ -54,17 +97,17 @@ npm run inspector -- review --repo ./path/to/repo --validate "npm test"
 
 The report is written to `review-report.md`.
 
-## MCP
+## Retained experimental MCP source
 
-Start the stdio server with:
+`src/mcp-server.ts` and its package script are retained as compatibility source
+only, not as startup or tool-use instructions. Do not start, register, connect
+to, or invoke this MCP source for agent experiments, automation, or any
+untrusted use.
 
-```bash
-npm run mcp-server
-```
-
-It exposes a `review_repository` tool. Inspect the implementation to determine
-its current input contract and whether it is suitable for the production model
-you propose.
+It remains unavailable until Issue #1 implements typed repository-path mapping,
+Issue #4 implements a shellless, allowlisted validation policy, and Issue #5
+implements timeout and output bounds. Those changes are unfinished and are
+explicitly outside this docs-only PR.
 
 ## Project layout
 
