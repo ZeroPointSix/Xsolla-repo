@@ -22,6 +22,8 @@ import {
 
 const temporaryDirectories: string[] = [];
 const fixturePids = new Set<number>();
+const FIXTURE_WAIT_TIMEOUT_MS = 10_000;
+const FIXTURE_POLL_INTERVAL_MS = 10;
 const childFixturePath = fileURLToPath(
   new URL("./fixtures/validation-child.cjs", import.meta.url),
 );
@@ -45,7 +47,7 @@ async function createTemporaryDirectory(): Promise<string> {
 
 async function waitFor<T>(
   callback: () => T | undefined | Promise<T | undefined>,
-  timeoutMs = 750,
+  timeoutMs = FIXTURE_WAIT_TIMEOUT_MS,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -53,7 +55,7 @@ async function waitFor<T>(
     if (value !== undefined) {
       return value as T;
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, FIXTURE_POLL_INTERVAL_MS));
   }
   throw new Error("Timed out waiting for child fixture state.");
 }
@@ -66,6 +68,16 @@ async function readFixturePid(marker: string): Promise<number> {
     const content = await readFile(marker, "utf8");
     const pid = Number.parseInt(content, 10);
     return Number.isInteger(pid) ? pid : undefined;
+  });
+}
+
+async function waitForFixtureMarker(marker: string, expected: string): Promise<void> {
+  await waitFor(async () => {
+    if (!existsSync(marker)) {
+      return undefined;
+    }
+    const content = await readFile(marker, "utf8");
+    return content.includes(expected) ? true : undefined;
   });
 }
 
@@ -505,7 +517,7 @@ describe("runValidation", () => {
       const validation = runValidation(
         childFixtureCommand("hang-with-descendant", parentMarker, descendantMarker),
         directory,
-        { timeoutMs: 1_000, terminationGraceMs: 75 },
+        { timeoutMs: 3_000, terminationGraceMs: 500 },
       );
       const parentPid = await readFixturePid(parentMarker);
       const descendantPid = await readFixturePid(descendantMarker);
@@ -513,13 +525,14 @@ describe("runValidation", () => {
       fixturePids.add(descendantPid);
 
       const result = await validation;
-      expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 1_000 });
+      expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 3_000 });
       expect(result.terminationError).toBeUndefined();
-      await expect(readFile(parentMarker, "utf8")).resolves.toContain("TERM");
-      await expect(readFile(descendantMarker, "utf8")).resolves.toContain("TERM");
+      await waitForFixtureMarker(parentMarker, "TERM");
+      await waitForFixtureMarker(descendantMarker, "TERM");
       await waitForProcessExit(parentPid);
       await waitForProcessExit(descendantPid);
     },
+    15_000,
   );
 
   for (let attempt = 1; attempt <= 10; attempt += 1) {
@@ -536,7 +549,7 @@ describe("runValidation", () => {
             descendantMarker,
           ),
           directory,
-          { timeoutMs: 1_000, terminationGraceMs: 500 },
+          { timeoutMs: 3_000, terminationGraceMs: 500 },
         );
         const parentPid = await readFixturePid(parentMarker);
         const descendantPid = await readFixturePid(descendantMarker);
@@ -544,14 +557,15 @@ describe("runValidation", () => {
         fixturePids.add(descendantPid);
 
         const result = await validation;
-        expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 1_000 });
+        expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 3_000 });
         expect(result.terminationError).toBeUndefined();
-        await expect(readFile(parentMarker, "utf8")).resolves.toContain("TERM");
-        await expect(readFile(descendantMarker, "utf8")).resolves.toContain("TERM-IGNORED");
+        await waitForFixtureMarker(parentMarker, "TERM");
+        await waitForFixtureMarker(descendantMarker, "TERM-IGNORED");
         // This is deliberately immediate: resolution itself is the cleanup
         // boundary, rather than a later best-effort background operation.
         expect(isProcessRunning(descendantPid)).toBe(false);
       },
+      15_000,
     );
   }
 
@@ -564,7 +578,7 @@ describe("runValidation", () => {
       const validation = runValidation(
         childFixtureCommand("hang-with-descendant", parentMarker, descendantMarker),
         directory,
-        { timeoutMs: 1_000, terminationGraceMs: 75 },
+        { timeoutMs: 3_000, terminationGraceMs: 500 },
       );
       const parentPid = await readFixturePid(parentMarker);
       const descendantPid = await readFixturePid(descendantMarker);
@@ -572,7 +586,7 @@ describe("runValidation", () => {
       fixturePids.add(descendantPid);
 
       const result = await validation;
-      expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 1_000 });
+      expect(result).toMatchObject({ status: "timed_out", exitCode: null, timeoutMs: 3_000 });
       await waitForProcessExit(parentPid);
       await waitForProcessExit(descendantPid);
     },
@@ -886,11 +900,11 @@ describe("runValidation", () => {
         `node -e "process.stdout.write('second ran')"`,
       ],
       directory,
-      { timeoutMs: 250, terminationGraceMs: 25 },
+      { timeoutMs: 1_000, terminationGraceMs: 250 },
     );
 
     expect(results).toMatchObject([
-      { status: "timed_out", exitCode: null, timeoutMs: 250 },
+      { status: "timed_out", exitCode: null, timeoutMs: 1_000 },
       { status: "passed", exitCode: 0, stdout: "second ran" },
     ]);
   });

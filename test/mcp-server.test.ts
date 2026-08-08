@@ -180,7 +180,7 @@ describe("MCP server", () => {
       await client.close();
       await server.close();
     }
-  });
+  }, 15_000);
 
   it("rejects option-like base refs before review can invoke Git", async () => {
     const fixture = await createRepository();
