@@ -115,6 +115,12 @@ npm run inspector -- review --repo ./path/to/repo --format markdown
 npm run inspector -- review --repo ./path/to/repo --validate "npm test"
 ```
 
+When `--base-ref` is omitted, the inspector resolves a commit from the current
+branch's upstream, then `refs/remotes/origin/HEAD`, `refs/heads/main`, and
+`refs/heads/master`. The local fallbacks support standalone repositories and the
+fully qualified fallback refs prevent same-named tags from being selected. If none
+resolves, pass an existing commit ref explicitly with `--base-ref <commit-ish>`.
+
 The report is written to `review-report.md`.
 
 ## Retained experimental MCP source
