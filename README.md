@@ -124,10 +124,11 @@ resolves, pass an existing commit ref explicitly with `--base-ref <commit-ish>`.
 ### Git change parsing
 
 The inspector requests Git's NUL-delimited `--name-status -z` output with rename
-and copy detection (including `--find-copies-harder`). A complete valid stream is
-parsed losslessly: `A`, `D`, `M`, `R<score>`, `C<score>`, `T`, and `U` records
-retain their original paths, including Unicode, tabs, and newlines. An empty
-stream means there are no changed files.
+and copy detection (including `--find-copies-harder`) for committed, staged, and
+unstaged diffs. A complete valid stream is parsed losslessly: `A`, `D`, `M`,
+`R<score>`, `C<score>`, `T`, and `U` records retain their original paths,
+including Unicode, tabs, and newlines. An empty stream means there are no changed
+files.
 
 The parser is deliberately fail-closed. It throws a typed
 `GitNameStatusParseError` and returns no changed-file list when a stream contains
@@ -135,6 +136,23 @@ an empty or unknown status field, an incomplete or misaligned record, or lacks
 the final NUL terminator. It does not try to resynchronize malformed fields,
 because doing so could fabricate paths or misassign later fields to an earlier
 status record.
+
+### Complete local-review changed-file view
+
+The changed-files section represents the complete local review state, not only
+commits already on the branch. It combines the committed diff from the resolved
+base through `HEAD`, staged index changes, unstaged working-tree changes, and
+non-ignored untracked files. Git output is NUL-delimited, so spaces, Unicode,
+and embedded newlines in paths remain intact. Ignored files are excluded.
+
+Entries are merged to one effective entry for each current path with this
+precedence: committed changes provide the baseline, staged changes override that
+entry, and unstaged changes override the staged entry. An untracked entry fills a
+missing path and also replaces an effective deletion at its path, because that
+file currently exists in the working tree. Sequential renames are composed to
+their final destination; effective rename and copy entries retain the earliest
+source path and copy status. The resulting entries are sorted lexicographically
+by current path for deterministic reports.
 
 The report is written to `review-report.md`.
 

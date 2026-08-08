@@ -326,6 +326,117 @@ export function parseNameStatusNul(output: string): ChangedFile[] {
   return files;
 }
 
+/**
+ * Extracts untracked paths from Git's NUL-delimited porcelain v1 output.
+ * Rename and copy records have a second NUL-delimited source path, which must
+ * be skipped even though only `??` records are returned.
+ */
+export function parseUntrackedPorcelainNul(output: string): ChangedFile[] {
+  const fields = output.split("\0").slice(0, -1);
+  const files: ChangedFile[] = [];
+  let index = 0;
+
+  while (index < fields.length) {
+    const record = fields[index++] ?? "";
+    const status = record.slice(0, 2);
+
+    if (status === "??" && record[2] === " ") {
+      const path = record.slice(3);
+      if (path) {
+        files.push({ path, status: "untracked" });
+      }
+      continue;
+    }
+
+    if (record[2] === " " && (status.includes("R") || status.includes("C"))) {
+      index += 1;
+    }
+  }
+
+  return files;
+}
+
+function comparePaths(left: ChangedFile, right: ChangedFile): number {
+  if (left.path < right.path) {
+    return -1;
+  }
+  if (left.path > right.path) {
+    return 1;
+  }
+  return 0;
+}
+
+function isRenameOrCopy(
+  file: ChangedFile,
+): file is Extract<ChangedFile, { status: "renamed" | "copied" }> {
+  return file.status === "renamed" || file.status === "copied";
+}
+
+function mergeTrackedFile(
+  effectiveFiles: Map<string, ChangedFile>,
+  file: ChangedFile,
+): void {
+  if (file.status !== "renamed") {
+    effectiveFiles.set(file.path, file);
+    return;
+  }
+
+  const previous = effectiveFiles.get(file.previousPath);
+  if (!previous) {
+    effectiveFiles.set(file.path, file);
+    return;
+  }
+
+  effectiveFiles.delete(file.previousPath);
+  if (isRenameOrCopy(previous)) {
+    effectiveFiles.set(file.path, {
+      path: file.path,
+      previousPath: previous.previousPath,
+      status: previous.status,
+    });
+    return;
+  }
+
+  if (previous.status === "added") {
+    effectiveFiles.set(file.path, { path: file.path, status: "added" });
+    return;
+  }
+
+  effectiveFiles.set(file.path, file);
+}
+
+/**
+ * Combines Git's committed, index, worktree, and untracked views into one
+ * stable local-review view. Later tracked layers replace their current paths.
+ * A rename following an earlier destination composes the chain so intermediate
+ * paths are removed, while an earlier copy remains a copy from its source.
+ * Untracked paths fill gaps and replace deleted entries because they currently
+ * exist in the working tree.
+ */
+function mergeChangedFileLayers(
+  committed: ChangedFile[],
+  staged: ChangedFile[],
+  unstaged: ChangedFile[],
+  untracked: ChangedFile[],
+): ChangedFile[] {
+  const effectiveFiles = new Map<string, ChangedFile>();
+
+  for (const layer of [committed, staged, unstaged]) {
+    for (const file of layer) {
+      mergeTrackedFile(effectiveFiles, file);
+    }
+  }
+
+  for (const file of untracked) {
+    const existing = effectiveFiles.get(file.path);
+    if (!existing || existing.status === "deleted") {
+      effectiveFiles.set(file.path, file);
+    }
+  }
+
+  return [...effectiveFiles.values()].sort(comparePaths);
+}
+
 export function changedFiles(
   repositoryPath: string,
   baseRef?: string,
@@ -333,21 +444,31 @@ export function changedFiles(
 ): ChangedFile[] {
   const execute = dependencies.execute ?? executeGit;
   const base = resolveBaseRef(repositoryPath, baseRef, { execute });
+  const nameStatusArgs = ["--name-status", "-z", "--find-renames", "--find-copies"];
 
-  let output: string;
+  let committedOutput: string;
+  let stagedOutput: string;
+  let unstagedOutput: string;
+  let statusOutput: string;
   try {
-    output = runGitOutput(
+    committedOutput = runGitOutput(
       repositoryPath,
-      [
-        "diff",
-        "--name-status",
-        "-z",
-        "--find-renames",
-        "--find-copies",
-        "--find-copies-harder",
-        `${base}...HEAD`,
-        "--",
-      ],
+      ["diff", ...nameStatusArgs, "--find-copies-harder", `${base}...HEAD`, "--"],
+      execute,
+    );
+    stagedOutput = runGitOutput(
+      repositoryPath,
+      ["diff", ...nameStatusArgs, "--find-copies-harder", "--cached", "--"],
+      execute,
+    );
+    unstagedOutput = runGitOutput(
+      repositoryPath,
+      ["diff", ...nameStatusArgs, "--"],
+      execute,
+    );
+    statusOutput = runGitOutput(
+      repositoryPath,
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=no", "--"],
       execute,
     );
   } catch (error) {
@@ -359,5 +480,10 @@ export function changedFiles(
     );
   }
 
-  return parseNameStatusNul(output);
+  return mergeChangedFileLayers(
+    parseNameStatusNul(committedOutput),
+    parseNameStatusNul(stagedOutput),
+    parseNameStatusNul(unstagedOutput),
+    parseUntrackedPorcelainNul(statusOutput),
+  );
 }
