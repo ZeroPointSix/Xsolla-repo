@@ -1,6 +1,7 @@
 name: Public checks
 
 on:
+  pull_request:
   push:
   workflow_dispatch:
 
@@ -8,14 +9,19 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      NPM_CONFIG_ENGINE_STRICT: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "20.19.0"
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run lint
       - run: npm run build
-      - run: node ./dist/cli.js review --help
+      - run: npm run smoke:installed-cli
+      - run: npm run smoke:compiled-mcp
       - run: npm test
+      - run: npm audit --omit=dev --package-lock-only
