@@ -5,6 +5,7 @@
 然后源码丢给Ai分析一下安全性和兼容性问题，把问题汇总一下，排个序
 所以优先级很简单：让工具可以正常使用，再谈安全、Git 解析、报告和测试。
 
+整个项目的思考的核心想法就是这份总结稿了，https://github.com/ZeroPointSix/Xsolla-repo/issues/16#issuecomment-5217159577 基本表达清楚了我自己的想法。
 
 ## What did you choose to implement or fix?
 
