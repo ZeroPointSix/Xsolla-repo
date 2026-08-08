@@ -16,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
@@ -27,8 +27,5 @@
   },
   "engines": {
     "node": ">=20"
-  },
-  "overrides": {
-    "@hono/node-server": "2.0.10"
   }
 }
