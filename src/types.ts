@@ -33,5 +33,11 @@ export type ReviewRequest = {
   repositoryPath: string;
   baseRef?: string;
   validationCommands?: string[];
-  format?: "markdown" | "json";
+};
+
+/** Format-neutral result returned by the shared review orchestration. */
+export type ReviewResult = {
+  repositoryPath: string;
+  changedFiles: ChangedFile[];
+  validationResults: ValidationResult[];
 };

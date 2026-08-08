@@ -6,7 +6,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { reviewRepository } from "./core.js";
-import type { ReviewRequest } from "./types.js";
+import type { ReviewRequest, ReviewResult } from "./types.js";
 import {
   MCP_VALIDATION_DEFAULTS,
   tokenizeValidationCommand,
@@ -28,6 +28,45 @@ export const mcpReviewRequestSchema = z.object({
 });
 
 export type McpReviewRequest = z.infer<typeof mcpReviewRequestSchema>;
+
+const changedFileSchema = z.discriminatedUnion("status", [
+  z.object({ path: z.string(), status: z.literal("added") }),
+  z.object({ path: z.string(), status: z.literal("deleted") }),
+  z.object({ path: z.string(), status: z.literal("modified") }),
+  z.object({ path: z.string(), status: z.literal("type_changed") }),
+  z.object({ path: z.string(), status: z.literal("unmerged") }),
+  z.object({ path: z.string(), status: z.literal("untracked") }),
+  z.object({ path: z.string(), previousPath: z.string(), status: z.literal("renamed") }),
+  z.object({ path: z.string(), previousPath: z.string(), status: z.literal("copied") }),
+]);
+
+const validationOutputTruncationSchema = z.object({
+  truncated: z.boolean(),
+  capturedBytes: z.number().int().nonnegative(),
+  omittedBytes: z.number().int().nonnegative(),
+});
+
+const validationResultSchema = z.object({
+  command: z.string(),
+  status: z.enum(["passed", "failed", "error", "timed_out"]),
+  exitCode: z.number().int().nullable(),
+  stdout: z.string(),
+  stderr: z.string(),
+  stdoutTruncation: validationOutputTruncationSchema,
+  stderrTruncation: validationOutputTruncationSchema,
+  signal: z.string().optional(),
+  error: z.string().optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  terminationError: z.string().optional(),
+});
+
+export const mcpReviewResultSchema = z.object({
+  repositoryPath: z.string(),
+  changedFiles: z.array(changedFileSchema),
+  validationResults: z.array(validationResultSchema),
+});
+
+export const MCP_TEXT_SUMMARY_MAX_LENGTH = 256;
 
 type McpEnvironment = Record<string, string | undefined>;
 
@@ -136,30 +175,51 @@ export function validateMcpReviewRequest(
 
 function policyDescription(): string {
   return [
-    "Inspects a Git repository and returns a review report.",
+    "Inspects a Git repository and returns a structured review result.",
     `Experimental MCP requires repo_path to resolve under ${MCP_REPOSITORY_ROOT_ENV}.`,
     `Validation commands must exactly match: ${DEFAULT_MCP_VALIDATION_COMMANDS.join(", ")}.`,
     `Set ${MCP_ALLOW_ANY_VALIDATION_COMMANDS_ENV}=1 to allow other shellless commands.`,
   ].join(" ");
 }
 
+function boundedMcpText(text: string): string {
+  return text.length <= MCP_TEXT_SUMMARY_MAX_LENGTH
+    ? text
+    : `${text.slice(0, MCP_TEXT_SUMMARY_MAX_LENGTH - 1)}…`;
+}
+
+function reviewSummary(result: ReviewResult): string {
+  const passedValidations = result.validationResults.filter(
+    (validation) => validation.status === "passed",
+  ).length;
+  return boundedMcpText(
+    `Review complete: ${result.changedFiles.length} changed files; ${passedValidations}/${result.validationResults.length} validations passed.`,
+  );
+}
+
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const server = new McpServer({ name: "repository-inspector", version: "2.0.0" });
   const environment = options.environment ?? process.env;
 
-  server.tool(
+  server.registerTool(
     "review_repository",
-    policyDescription(),
-    mcpReviewRequestSchema.shape,
+    {
+      description: policyDescription(),
+      inputSchema: mcpReviewRequestSchema,
+      outputSchema: mcpReviewResultSchema,
+    },
     async (input: McpReviewRequest) => {
       try {
         const request = validateMcpReviewRequest(toReviewRequest(input), environment);
-        const report = await reviewRepository(request, MCP_VALIDATION_DEFAULTS);
-        return { content: [{ type: "text", text: report }] };
+        const result = await reviewRepository(request, MCP_VALIDATION_DEFAULTS);
+        return {
+          content: [{ type: "text", text: reviewSummary(result) }],
+          structuredContent: result,
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown MCP review failure.";
         return {
-          content: [{ type: "text", text: `MCP review rejected: ${message}` }],
+          content: [{ type: "text", text: boundedMcpText(`MCP review rejected: ${message}`) }],
           isError: true,
         };
       }

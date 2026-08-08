@@ -2,6 +2,7 @@
 import { writeFileSync } from "node:fs";
 import { CliUsageError, parseArgs, usage } from "./args.js";
 import { reviewRepository } from "./core.js";
+import { markdownReport } from "./report.js";
 
 const VERSION = "2.0.0";
 
@@ -16,14 +17,18 @@ async function main() {
     return;
   }
 
-  const report = await reviewRepository({
+  const result = await reviewRepository({
     repositoryPath: args.repositoryPath,
     baseRef: args.baseRef,
     validationCommands: args.validations,
-    format: args.format,
   });
-  writeFileSync("review-report.md", report, "utf8");
-  console.log("Review report written to review-report.md");
+  const format = args.format ?? "markdown";
+  const outputFile = format === "json" ? "review-report.json" : "review-report.md";
+  const output =
+    format === "json" ? `${JSON.stringify(result, null, 2)}\n` : markdownReport(result);
+
+  writeFileSync(outputFile, output, "utf8");
+  console.log(`Review report written to ${outputFile}`);
 }
 
 main().catch((error: unknown) => {

@@ -1,17 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
+import { reviewRepository } from "../src/core.js";
 import {
   DEFAULT_MCP_VALIDATION_COMMANDS,
   MCP_ALLOW_ANY_VALIDATION_COMMANDS_ENV,
   MCP_REPOSITORY_ROOT_ENV,
+  MCP_TEXT_SUMMARY_MAX_LENGTH,
   createMcpServer,
 } from "../src/mcp-server.js";
+import { MCP_VALIDATION_DEFAULTS } from "../src/validation.js";
 
 type RepositoryFixture = {
   root: string;
@@ -103,6 +106,17 @@ function errorText(result: unknown): string {
   return text.text;
 }
 
+function resultStructuredContent(result: unknown): unknown {
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("structuredContent" in result)
+  ) {
+    throw new Error("Expected structured MCP tool content.");
+  }
+  return result.structuredContent;
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
@@ -146,13 +160,22 @@ describe("MCP server", () => {
           validation_commands: ["npm test"],
         },
       });
+      const expectedResult = await reviewRepository(
+        {
+          repositoryPath: realpathSync(fixture.repositoryPath),
+          baseRef: "HEAD~1",
+          validationCommands: ["npm test"],
+        },
+        MCP_VALIDATION_DEFAULTS,
+      );
       const text = errorText(result);
 
       expect("isError" in result && result.isError).toBe(false);
-      expect(text).toContain("latest-feature.txt (added)");
-      expect(text).not.toContain("earlier-feature.txt (added)");
-      expect(text).toContain("### npm test");
-      expect(text).toContain("validation ran");
+      expect(resultStructuredContent(result)).toEqual(expectedResult);
+      expect(text).toBe("Review complete: 1 changed files; 1/1 validations passed.");
+      expect(text.length).toBeLessThanOrEqual(MCP_TEXT_SUMMARY_MAX_LENGTH);
+      expect(text).not.toContain("latest-feature.txt");
+      expect(text).not.toContain("validation ran");
     } finally {
       await client.close();
       await server.close();
@@ -239,7 +262,9 @@ describe("MCP server", () => {
     );
 
     expect("isError" in result && result.isError).toBe(false);
-    expect(errorText(result)).toContain("broadened command ran");
+    expect(resultStructuredContent(result)).toMatchObject({
+      validationResults: [{ stdout: "broadened command ran" }],
+    });
   });
 
   it("rejects repository paths outside the configured root", async () => {
