@@ -1,6 +1,6 @@
 # 回归覆盖审计矩阵
 
-审计基线：父分支 `chore/issue-14-remove-unjustified-hono-override`（PR #30，`4e1df89`）。PR #31 创建本矩阵并新增 #9 的端到端核心流程测试；PR #33 只校正并记录基于 #32 更新后 head 的最终矩阵证据，不新增核心流程或其他运行时测试。
+审计基线：`main` 在堆叠 PR #18–#33 全部合并后的最终状态（合并收口 commit `e5f3aa4`，PR #33）。PR #31 创建本矩阵并新增 #9 的端到端核心流程测试；PR #33 校正并记录基于 #32 的矩阵证据；本文件在合入后仅把基线叙述从「父分支/未合并」更新为「已在 main」。
 
 | Issue / PR | 专属回归目标 | 覆盖位置或自动化证据 |
 | --- | --- | --- |
@@ -18,6 +18,7 @@
 | #13 / #28 | 格式无关 `ReviewResult`、CLI JSON、MCP 结构化响应 | `test/core.test.ts`、`test/cli.test.ts`、`test/mcp-server.test.ts`。 |
 | #14 / #30 | 生产依赖解析与漏洞消除 | `npm ls @modelcontextprotocol/sdk @hono/node-server --all`、`npm audit --omit=dev --package-lock-only`；依赖配置变更不适用单元回归。 |
 | #15 / #18 | CLI 优先的接口边界文档 | `README.md`、`SUBMISSION.md` 审阅；文档决策不适用运行时回归。 |
-| #9 / #31 | 端到端核心编排：提交变更、当前未跟踪文件和安全校验 | PR #31 新增的 `test/core-flow.test.ts`：临时 Git 仓库直接断言结构化 `ReviewResult`，不快照 Markdown。PR #33 仅校正/记录本最终矩阵证据，不新增该核心流程。 |
+| #9 / #31 | 端到端核心编排：提交变更、当前未跟踪文件和安全校验 | PR #31 新增的 `test/core-flow.test.ts`：临时 Git 仓库直接断言结构化 `ReviewResult`，不快照 Markdown。 |
+| #16 / #33 | 交付收口与合入后交卷叙述 | `SUBMISSION.md`：Issue→设计→代码落点、已合并堆叠表、交卷 checklist。 |
 
-结论：PR #31 负责 #9 核心流程回归与原始审计矩阵；PR #33 仅校正/记录最终矩阵证据。运行时修复均有定位测试；构建、CI、依赖审计和文档决策通过相应自动化命令或审阅证据覆盖。
+结论：运行时修复均有定位测试；构建、CI、依赖审计和文档决策通过相应自动化命令或审阅证据覆盖。堆叠 PR 已全部进入 `main`，本矩阵描述的是当前默认可交付状态。
